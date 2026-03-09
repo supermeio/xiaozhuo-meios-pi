@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+/**
+ * meios — lightweight vertical agent powered by pi-mono
+ *
+ * Usage:
+ *   One-shot:    node --import tsx src/index.ts --message "你好"
+ *   Interactive: node --import tsx src/index.ts
+ */
+
+import { createAgentSession, codingTools } from '@mariozechner/pi-coding-agent'
+import { getModel } from '@mariozechner/pi-ai'
+import { readFileSync, existsSync, mkdirSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { createInterface } from 'node:readline'
+import { wardrobeTools, setWorkspaceRoot } from './tools.js'
+
+// ── Config ──
+const WORKSPACE = resolve(import.meta.dirname, '..', 'workspace')
+const AGENT_DIR = resolve(import.meta.dirname, '..', '.meios-agent')
+mkdirSync(AGENT_DIR, { recursive: true })
+setWorkspaceRoot(WORKSPACE)
+
+// ── Load system prompt from SOUL.md + MEMORY.md ──
+function loadSystemPrompt(): string {
+  const parts: string[] = []
+  const soulPath = resolve(WORKSPACE, 'SOUL.md')
+  const memoryPath = resolve(WORKSPACE, 'MEMORY.md')
+  if (existsSync(soulPath)) parts.push(readFileSync(soulPath, 'utf-8'))
+  if (existsSync(memoryPath)) parts.push('---\n\n# 用户记忆\n\n' + readFileSync(memoryPath, 'utf-8'))
+  return parts.join('\n\n')
+}
+
+// ── Parse CLI args ──
+function parseArgs() {
+  const args = process.argv.slice(2)
+  const msgIdx = args.indexOf('--message')
+  if (msgIdx !== -1 && args[msgIdx + 1]) {
+    return { mode: 'oneshot' as const, message: args[msgIdx + 1] }
+  }
+  return { mode: 'interactive' as const, message: '' }
+}
+
+// ── Main ──
+async function main() {
+  const { mode, message } = parseArgs()
+
+  console.log('🧥 meios wardrobe agent starting...')
+  console.log(`   workspace: ${WORKSPACE}`)
+
+  // Load API key
+  const authPath = resolve(AGENT_DIR, 'auth.json')
+  if (existsSync(authPath)) {
+    const auth = JSON.parse(readFileSync(authPath, 'utf-8'))
+    if (auth.anthropic?.token && !process.env.ANTHROPIC_API_KEY) {
+      process.env.ANTHROPIC_API_KEY = auth.anthropic.token
+    }
+  }
+
+  const model = getModel('anthropic', 'claude-haiku-4-5')
+  console.log(`   model: ${model.name} (${model.id})`)
+  console.log('')
+
+  const { session } = await createAgentSession({
+    cwd: WORKSPACE,
+    agentDir: AGENT_DIR,
+    model,
+    tools: codingTools,  // read, bash, edit, write — 自我维修能力,
+    customTools: wardrobeTools,
+    thinkingLevel: 'minimal',
+  })
+
+  const systemPrompt = loadSystemPrompt()
+
+  // ── Run a prompt, collect text via events ──
+  async function chat(input: string): Promise<string> {
+    return new Promise<string>((resolveText) => {
+      const textChunks: string[] = []
+
+      const unsub = session.subscribe((event: any) => {
+        // Collect only text deltas (skip thinking)
+        if (event.type === 'message_update') {
+          const evt = event.assistantMessageEvent
+          if (evt?.type === 'text_delta' && evt.delta) {
+            textChunks.push(evt.delta)
+          }
+        }
+
+        // On agent_end, resolve with collected text
+        if (event.type === 'agent_end') {
+          unsub()
+          if (textChunks.length > 0) {
+            resolveText(textChunks.join(''))
+          } else {
+            // Fallback: extract from final messages
+            const text = (event.messages ?? [])
+              .flatMap((m: any) => m.content ?? [])
+              .filter((b: any) => b.type === 'text')
+              .map((b: any) => b.text)
+              .join('')
+            resolveText(text || '[无回复]')
+          }
+        }
+      })
+
+      session.prompt(input, { systemPrompt, abortSignal: undefined, images: [] })
+    })
+  }
+
+  // ── One-shot mode ──
+  if (mode === 'oneshot') {
+    console.log(`你> ${message}\n`)
+    const reply = await chat(message)
+    console.log(`小周> ${reply}`)
+    return
+  }
+
+  // ── Interactive REPL ──
+  console.log('🧥 meios ready! Type your message (Ctrl+C to quit)')
+  console.log('─'.repeat(50))
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: '\n你> ',
+    terminal: process.stdin.isTTY ?? false,
+  })
+
+  rl.prompt()
+
+  rl.on('line', async (line) => {
+    const input = line.trim()
+    if (!input) { rl.prompt(); return }
+    try {
+      const reply = await chat(input)
+      console.log(`\n小周> ${reply}`)
+    } catch (err: any) {
+      console.error(`\n[错误] ${err.message ?? err}`)
+    }
+    rl.prompt()
+  })
+
+  rl.on('close', () => {
+    console.log('\n👋 bye!')
+    process.exit(0)
+  })
+}
+
+main().catch((err) => {
+  console.error('Fatal:', err)
+  process.exit(1)
+})

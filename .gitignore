@@ -1,0 +1,9 @@
+node_modules/
+.env.local
+.env
+.meios-agent/auth.json
+.meios-agent/daytona-sandbox.json
+.meios-agent/sessions/
+workspace/closet/
+workspace/memory/
+*.log

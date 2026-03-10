@@ -28,8 +28,9 @@ import { initHeartbeat } from './heartbeat.js'
 // ── Config ──────────────────────────────────────────────────
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '18800')
 const VERSION = '0.1.0'
-const WORKSPACE = resolve(import.meta.dirname, '..', 'workspace')
-const AGENT_DIR = resolve(import.meta.dirname, '..', '.meios-agent')
+const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
+const WORKSPACE = resolve(PROJECT_ROOT, 'workspace')
+const AGENT_DIR = resolve(PROJECT_ROOT, '.meios-agent')
 const SESSIONS_DIR = resolve(AGENT_DIR, 'sessions')
 
 mkdirSync(AGENT_DIR, { recursive: true })

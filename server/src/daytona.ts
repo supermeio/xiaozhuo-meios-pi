@@ -13,7 +13,7 @@ import { readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 // ── Config ──
-const PROJECT_ROOT = resolve(import.meta.dirname, '..')
+const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
 const STATE_FILE = resolve(PROJECT_ROOT, '.meios-agent', 'daytona-sandbox.json')
 const LABEL = { app: 'meios', version: '0.1.0' }
 

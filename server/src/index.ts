@@ -15,8 +15,9 @@ import { createInterface } from 'node:readline'
 import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 
 // ── Config ──
-const WORKSPACE = resolve(import.meta.dirname, '..', 'workspace')
-const AGENT_DIR = resolve(import.meta.dirname, '..', '.meios-agent')
+const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
+const WORKSPACE = resolve(PROJECT_ROOT, 'workspace')
+const AGENT_DIR = resolve(PROJECT_ROOT, '.meios-agent')
 mkdirSync(AGENT_DIR, { recursive: true })
 setWorkspaceRoot(WORKSPACE)
 

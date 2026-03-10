@@ -1,0 +1,22 @@
+{
+  "name": "meios-gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@daytonaio/sdk": "^0",
+    "@hono/node-server": "^1",
+    "@supabase/supabase-js": "^2",
+    "hono": "^4",
+    "jose": "^6.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

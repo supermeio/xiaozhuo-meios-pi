@@ -1,4 +1,5 @@
 node_modules/
+dist/
 .env.local
 .env
 .meios-agent/auth.json
@@ -7,3 +8,4 @@ node_modules/
 workspace/closet/
 workspace/memory/
 *.log
+upstream/

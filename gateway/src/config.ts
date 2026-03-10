@@ -19,6 +19,9 @@ export const config = {
   meios: {
     repoUrl: process.env.MEIOS_REPO_URL ?? 'https://github.com/supermeio/xiaozhuo-meios-pi.git',
     anthropicKey: required('ANTHROPIC_API_KEY'),
+    // LLM proxy URL for sandboxes (Supabase Edge Function — whitelisted by Daytona)
+    llmProxyUrl: process.env.MEIOS_LLM_PROXY_URL
+      ?? `${process.env.SUPABASE_URL ?? 'https://exyqukzhnjhbypakhlsp.supabase.co'}/functions/v1/llm-proxy`,
     gatewayPort: 18800,
   },
 } as const

@@ -10,6 +10,7 @@ export interface Sandbox {
   signed_url: string | null
   signed_url_exp: string | null
   port: number
+  token: string | null
   status: 'active' | 'suspended' | 'error'
   created_at: string
   updated_at: string
@@ -53,6 +54,18 @@ export async function upsertSandbox(sandbox: Partial<Sandbox> & { user_id: strin
     .single()
 
   if (error) throw new Error(`Failed to upsert sandbox: ${error.message}`)
+  return data as Sandbox
+}
+
+export async function getSandboxByToken(token: string): Promise<Sandbox | null> {
+  const { data, error } = await getSupabase()
+    .from('sandboxes')
+    .select('*')
+    .eq('token', token)
+    .eq('status', 'active')
+    .single()
+
+  if (error || !data) return null
   return data as Sandbox
 }
 

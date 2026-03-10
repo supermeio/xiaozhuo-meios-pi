@@ -11,6 +11,7 @@ CREATE TABLE sandboxes (
   port            integer DEFAULT 18800,
   status          text DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'error')),
   created_at      timestamptz DEFAULT now(),
+  token           text,
   updated_at      timestamptz DEFAULT now()
 );
 

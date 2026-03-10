@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { Daytona, Image } from '@daytonaio/sdk'
 import { getSandboxByUserId, updateSignedUrl, upsertSandbox, type Sandbox } from './db.js'
 import { config } from './config.js'
@@ -67,7 +68,10 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 
   log(`provisioning sandbox for user ${userId}...`)
 
-  // 1. Create sandbox
+  // Generate a per-sandbox token for LLM proxy auth
+  const sandboxToken = `sbx_${randomBytes(32).toString('hex')}`
+
+  // 1. Create sandbox — real API key never enters the sandbox
   const sb = await daytona.create({
     image: Image.base('node:20-slim'),
     language: 'typescript',
@@ -76,7 +80,8 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     autoStopInterval: 0,
     autoArchiveInterval: 10080, // 7 days
     envVars: {
-      ANTHROPIC_API_KEY: config.meios.anthropicKey,
+      ANTHROPIC_BASE_URL: config.meios.llmProxyUrl,
+      ANTHROPIC_API_KEY: sandboxToken,
     },
   }, {
     timeout: 120,
@@ -110,8 +115,10 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
   // Brief wait for gateway startup
   await new Promise(r => setTimeout(r, 3000))
 
-  // Verify health
-  const health = await sb.process.executeCommand(`curl -s http://localhost:${port}/health`)
+  // Verify health (node:20-slim has no curl)
+  const health = await sb.process.executeCommand(
+    `node -e "const h=require('http');h.get('http://localhost:${port}/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>console.log(d))}).on('error',e=>console.error(e.message))"`,
+  )
   log(`health check: ${health.result}`)
 
   // 4. Get signed URL
@@ -119,13 +126,14 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
   const signedUrl = typeof result === 'string' ? result : result.url
   const expiresAt = new Date(Date.now() + SIGNED_URL_TTL * 1000).toISOString()
 
-  // 5. Store in DB
+  // 5. Store in DB (including sandbox token for LLM proxy auth)
   const sandbox = await upsertSandbox({
     user_id: userId,
     daytona_id: sb.id,
     signed_url: signedUrl,
     signed_url_exp: expiresAt,
     port,
+    token: sandboxToken,
     status: 'active',
   })
 

@@ -1,6 +1,6 @@
 # meios Architecture
 
-> Updated: 2026-03-10
+> Updated: 2026-03-11
 
 ## Overview
 
@@ -9,9 +9,9 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
 ## Architecture Diagram
 
 ```
-┌──────────┐     HTTPS      ┌──────────────┐    CNAME     ┌──────────────────┐
+┌──────────┐     HTTPS      ┌──────────────┐   Proxied    ┌──────────────────┐
 │ iOS App  │ ──────────────▶ │  Cloudflare  │ ──────────▶  │  GCP Cloud Run   │
-│ (Meio)   │  api.meios.ai  │     DNS       │              │  Auth Gateway    │
+│ (Meio)   │  api.meios.ai  │   (orange)   │              │  Auth Gateway    │
 └──────────┘                 └──────────────┘              └────────┬─────────┘
      │                                                         │   │   │
      │ login/signup                              JWKS verify   │   │   │
@@ -28,8 +28,22 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
      │  ┌───────────────────────────┐  │
      │  │  meios gateway (:18800)   │  │
      │  │  pi-agent + Claude 4.5    │  │
-     │  └───────────────────────────┘  │
-     └─────────────────────────────────┘
+     │  └───────────┬───────────────┘  │
+     │              │ LLM calls        │
+     └──────────────┼──────────────────┘
+                    │ x-api-key: sbx_token
+                    ▼
+     ┌──────────────────────────────┐
+     │  Supabase Edge Function     │
+     │  (llm-proxy)                │
+     │  validate token → forward   │
+     └──────────────┬───────────────┘
+                    │ x-api-key: real ANTHROPIC_API_KEY
+                    ▼
+     ┌──────────────────────────────┐
+     │  api.anthropic.com          │
+     │  Claude Haiku 4.5           │
+     └──────────────────────────────┘
 ```
 
 ## Components
@@ -44,10 +58,12 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
 - JWT verification via Supabase JWKS (ECC P-256)
 - Per-user sandbox routing with signed URL management
 - Auto-provisions sandbox for new users on first request
+- LLM proxy endpoint (`POST /v1/messages`) for non-sandbox clients
 
 ### Supabase
 - Auth: ECC P-256 JWT, JWKS verification
-- Postgres: `sandboxes` table (user_id → daytona_id, signed_url)
+- Postgres: `sandboxes` table (user_id → daytona_id, signed_url, token)
+- Edge Function: `llm-proxy` — LLM proxy for sandboxes (see [security.md](security.md))
 
 ### Daytona Sandbox (per-user)
 - Image: `node:20-slim`, 2 CPU, 2GB RAM, 5GB disk
@@ -64,12 +80,15 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
 ## Request Flow
 
 ```
-iOS → api.meios.ai (Cloudflare DNS)
+iOS → api.meios.ai (Cloudflare Proxied)
     → Cloud Run Auth Gateway
         → Verify JWT via JWKS
         → Lookup sandbox signed URL in Postgres (auto-provision if new user)
         → Proxy to Daytona sandbox
-            → meios gateway → pi-agent → Claude Haiku 4.5
+            → meios gateway → pi-agent
+            → LLM call: supabase.co/functions/v1/llm-proxy (sandbox token)
+            → Edge Function validates token → api.anthropic.com (real key)
+            ← Claude response
         ← { ok, data, error }
     ← Response to iOS
 ```
@@ -94,10 +113,14 @@ iOS → api.meios.ai (Cloudflare DNS)
 | `SUPABASE_SECRET_KEY` | Supabase secret key (server-side) |
 | `DAYTONA_API_KEY` | Daytona SDK API key |
 | `DAYTONA_API_URL` | Daytona API endpoint |
-| `ANTHROPIC_API_KEY` | Passed to new sandboxes for Claude access |
+| `ANTHROPIC_API_KEY` | System key for LLM proxy (never enters sandboxes) |
 
 ## Domain
 
 - **meios.ai** — registered on Cloudflare, WHOIS privacy enabled
-- **api.meios.ai** — CNAME → `ghs.googlehosted.com` → Cloud Run domain mapping
-- SSL: GCP managed certificate (Let's Encrypt, auto-provisioned)
+- **api.meios.ai** — CNAME → `ghs.googlehosted.com`, Cloudflare Proxy enabled (orange cloud)
+- SSL: GCP managed certificate (Let's Encrypt) + Cloudflare edge TLS
+
+## Security
+
+See [security.md](security.md) for API key security design, LLM proxy architecture, and Daytona network constraints.

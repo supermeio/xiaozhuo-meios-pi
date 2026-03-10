@@ -49,6 +49,11 @@ if (existsSync(authPath)) {
 // ── Model ───────────────────────────────────────────────────
 const model = getModel('anthropic', 'claude-haiku-4-5')
 
+// Override base URL if proxying through gateway (system key stays server-side)
+if (process.env.ANTHROPIC_BASE_URL) {
+  ;(model as any).baseUrl = process.env.ANTHROPIC_BASE_URL
+}
+
 // ── Init cron & heartbeat ───────────────────────────────────
 initCron(WORKSPACE)
 initHeartbeat(WORKSPACE)

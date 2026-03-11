@@ -69,6 +69,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
   log(`provisioning sandbox for user ${userId}...`)
 
   // Generate a per-sandbox token for LLM proxy auth
+  // TODO: hash tokens with SHA-256 before storing/querying. Store hash in DB, compare hash(input) == stored_hash. Add token expiry column.
   const sandboxToken = `sbx_${randomBytes(32).toString('hex')}`
 
   // 1. Create sandbox — real API key never enters the sandbox

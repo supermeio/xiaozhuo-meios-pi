@@ -3,6 +3,14 @@ import { getSandboxByToken } from './db.js'
 import { config } from './config.js'
 
 const ANTHROPIC_API = 'https://api.anthropic.com'
+const MAX_BODY_SIZE = 524288 // 512 KB
+
+// ── In-memory per-sandbox rate limiter ──
+
+const RATE_LIMIT_WINDOW_MS = 60_000 // 1 minute
+const RATE_LIMIT_MAX = 60           // requests per window
+
+const rateLimitMap = new Map<string, { count: number; windowStart: number }>()
 
 /**
  * Proxy LLM requests from sandboxes to the Anthropic API.
@@ -23,6 +31,28 @@ export async function llmProxy(c: Context): Promise<Response> {
   const sandbox = await getSandboxByToken(apiKey)
   if (!sandbox) {
     return c.json({ ok: false, error: 'Invalid sandbox token' }, 401)
+  }
+
+  // Rate limiting: 60 requests per minute per sandbox
+  const now = Date.now()
+  const sandboxId = sandbox.id
+  let entry = rateLimitMap.get(sandboxId)
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry = { count: 0, windowStart: now }
+    rateLimitMap.set(sandboxId, entry)
+  }
+  entry.count++
+  if (entry.count > RATE_LIMIT_MAX) {
+    const retryAfter = Math.ceil((entry.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000)
+    return c.json({ ok: false, error: 'Rate limit exceeded' }, 429, {
+      'Retry-After': String(retryAfter),
+    } as any)
+  }
+
+  // Request body size limit
+  const contentLength = c.req.header('Content-Length')
+  if (contentLength && parseInt(contentLength, 10) > MAX_BODY_SIZE) {
+    return c.json({ ok: false, error: 'Request body too large' }, 413)
   }
 
   // Build target URL: same path on Anthropic API
@@ -47,6 +77,12 @@ export async function llmProxy(c: Context): Promise<Response> {
 
   try {
     const body = await c.req.text()
+
+    // Check body size when Content-Length was not provided
+    if (!contentLength && body.length > MAX_BODY_SIZE) {
+      return c.json({ ok: false, error: 'Request body too large' }, 413)
+    }
+
     const upstream = await fetch(targetUrl, {
       method: c.req.method,
       headers,

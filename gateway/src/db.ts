@@ -57,6 +57,7 @@ export async function upsertSandbox(sandbox: Partial<Sandbox> & { user_id: strin
   return data as Sandbox
 }
 
+// TODO: hash tokens with SHA-256 before storing/querying. Store hash in DB, compare hash(input) == stored_hash. Add token expiry column.
 export async function getSandboxByToken(token: string): Promise<Sandbox | null> {
   const { data, error } = await getSupabase()
     .from('sandboxes')

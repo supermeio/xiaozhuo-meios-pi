@@ -11,6 +11,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2"
 
 const ANTHROPIC_API = "https://api.anthropic.com"
+const MAX_BODY_SIZE = 524288 // 512 KB
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -45,6 +46,7 @@ Deno.serve(async (req) => {
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   const supabase = createClient(supabaseUrl, supabaseKey)
 
+  // TODO: hash tokens with SHA-256 before storing/querying. Store hash in DB, compare hash(input) == stored_hash. Add token expiry column.
   const { data: sandbox, error: dbError } = await supabase
     .from("sandboxes")
     .select("id")
@@ -56,6 +58,19 @@ Deno.serve(async (req) => {
     return Response.json(
       { ok: false, error: "Invalid sandbox token" },
       { status: 401, headers: CORS_HEADERS },
+    )
+  }
+
+  // Rate limiting note: Edge Functions are stateless, so per-sandbox rate
+  // limiting is handled at the Cloud Run gateway level. If needed here, use
+  // Supabase rate limiting features or an external store (e.g. Redis / KV).
+
+  // Request body size limit
+  const contentLength = req.headers.get("Content-Length")
+  if (contentLength && parseInt(contentLength, 10) > MAX_BODY_SIZE) {
+    return Response.json(
+      { ok: false, error: "Request body too large" },
+      { status: 413, headers: CORS_HEADERS },
     )
   }
 
@@ -86,6 +101,15 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.text()
+
+    // Check body size when Content-Length was not provided
+    if (!contentLength && body.length > MAX_BODY_SIZE) {
+      return Response.json(
+        { ok: false, error: "Request body too large" },
+        { status: 413, headers: CORS_HEADERS },
+      )
+    }
+
     const upstream = await fetch(targetUrl, {
       method: "POST",
       headers,

@@ -1,6 +1,11 @@
 import type { Context } from 'hono'
 import type { AuthUser } from './auth.js'
+import type { Sandbox } from './db.js'
 import { resolveSignedUrl, forceRefreshSignedUrl, provisionSandbox } from './sandbox.js'
+
+// In-flight provision locks: prevents duplicate sandbox creation when
+// concurrent requests arrive for the same user before a sandbox exists.
+const provisionLocks = new Map<string, Promise<{ sandbox: Sandbox; signedUrl: string }>>()
 
 /**
  * Proxy an authenticated request to the user's Daytona sandbox.
@@ -15,11 +20,23 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
   const user = c.get('user') as AuthUser
   let signedUrl = await resolveSignedUrl(user.id)
 
-  // Auto-provision sandbox for new users
+  // Auto-provision sandbox for new users (with per-user lock to avoid duplicates)
   if (!signedUrl) {
     try {
-      const result = await provisionSandbox(user.id)
-      signedUrl = result.signedUrl
+      let pending = provisionLocks.get(user.id)
+      if (!pending) {
+        pending = provisionSandbox(user.id)
+        provisionLocks.set(user.id, pending)
+        try {
+          const result = await pending
+          signedUrl = result.signedUrl
+        } finally {
+          provisionLocks.delete(user.id)
+        }
+      } else {
+        const result = await pending
+        signedUrl = result.signedUrl
+      }
     } catch (err: any) {
       console.error(`[proxy] auto-provision failed for ${user.id}:`, err.message)
       return c.json(

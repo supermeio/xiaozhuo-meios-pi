@@ -88,8 +88,9 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
       // Anthropic — SDK reads ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY
       ANTHROPIC_BASE_URL: config.meios.llmProxyUrl,
       ANTHROPIC_API_KEY: sandboxToken,
-      // Google — SDK reads GOOGLE_API_KEY; we override baseUrl in server code
+      // Google — pi-ai SDK reads GEMINI_API_KEY; server code reads GOOGLE_API_KEY
       GEMINI_BASE_URL: config.meios.llmProxyUrl + '/google',
+      GEMINI_API_KEY: sandboxToken,
       GOOGLE_API_KEY: sandboxToken,
       // OpenAI — SDK reads OPENAI_API_KEY; we override baseUrl in server code
       OPENAI_BASE_URL: config.meios.llmProxyUrl + '/openai',
@@ -208,7 +209,7 @@ async function rotateToken(sandbox: Sandbox): Promise<void> {
 
   // Write token to env file that the gateway reads on startup
   await sb.process.executeCommand(
-    `cat > /home/daytona/meios/.env.token << 'EOF'\nANTHROPIC_API_KEY=${newToken}\nGOOGLE_API_KEY=${newToken}\nOPENAI_API_KEY=${newToken}\nKIMI_API_KEY=${newToken}\nEOF`,
+    `cat > /home/daytona/meios/.env.token << 'EOF'\nANTHROPIC_BASE_URL=${config.meios.llmProxyUrl}\nANTHROPIC_API_KEY=${newToken}\nGEMINI_BASE_URL=${config.meios.llmProxyUrl}/google\nGEMINI_API_KEY=${newToken}\nGOOGLE_API_KEY=${newToken}\nOPENAI_BASE_URL=${config.meios.llmProxyUrl}/openai\nOPENAI_API_KEY=${newToken}\nKIMI_BASE_URL=${config.meios.llmProxyUrl}/moonshot\nKIMI_API_KEY=${newToken}\nEOF`,
   )
 
   // Restart the gateway session with new env

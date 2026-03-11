@@ -241,7 +241,7 @@ Deno.serve(async (req) => {
 
   // 7. Provider detection
   const url = new URL(req.url)
-  const path = url.pathname.replace(/^\/llm-proxy/, "") || "/v1/messages"
+  const path = url.pathname.replace(/^.*\/llm-proxy/, "") || "/v1/messages"
 
   const route = detectProvider(path)
   if (!route) {

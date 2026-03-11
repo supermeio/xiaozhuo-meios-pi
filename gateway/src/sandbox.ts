@@ -120,6 +120,25 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
   }
   slog('deps installed')
 
+  // 2b. Write persistent .env.token — server reads this on startup
+  //     so it works even if Daytona loses env vars after restarts
+  const proxyUrl = config.meios.llmProxyUrl
+  const envTokenLines = [
+    `ANTHROPIC_BASE_URL=${proxyUrl}`,
+    `ANTHROPIC_API_KEY=${sandboxToken}`,
+    `GEMINI_BASE_URL=${proxyUrl}/google`,
+    `GEMINI_API_KEY=${sandboxToken}`,
+    `GOOGLE_API_KEY=${sandboxToken}`,
+    `OPENAI_BASE_URL=${proxyUrl}/openai`,
+    `OPENAI_API_KEY=${sandboxToken}`,
+    `KIMI_BASE_URL=${proxyUrl}/moonshot`,
+    `KIMI_API_KEY=${sandboxToken}`,
+  ].join('\n')
+  await sb.process.executeCommand(
+    `cat > /home/daytona/meios/.env.token << 'EOF'\n${envTokenLines}\nEOF`,
+  )
+  slog('.env.token written')
+
   // 3. Start gateway in background session
   slog('starting gateway...')
   await sb.process.createSession('gateway')
@@ -216,7 +235,7 @@ async function rotateToken(sandbox: Sandbox): Promise<void> {
   try { await sb.process.deleteSession('gateway') } catch {}
   await sb.process.createSession('gateway')
   await sb.process.executeSessionCommand('gateway', {
-    command: 'cd /home/daytona/meios/server && export $(cat /home/daytona/meios/.env.token | xargs) && rm -f /home/daytona/meios/.env.token && node --import tsx src/gateway.ts 2>&1',
+    command: 'cd /home/daytona/meios/server && node --import tsx src/gateway.ts 2>&1',
     runAsync: true,
   })
 

@@ -65,13 +65,39 @@ async function main() {
   console.log('🧥 meios wardrobe agent starting...')
   console.log(`   workspace: ${WORKSPACE}`)
 
-  // Load API key
+  // Load .env file (persisted by provisioning / token rotation)
+  const envFilePath = resolve(PROJECT_ROOT, '.env.token')
+  if (existsSync(envFilePath)) {
+    for (const line of readFileSync(envFilePath, 'utf-8').split('\n')) {
+      const match = line.match(/^([A-Z_]+)=(.+)$/)
+      if (match && !process.env[match[1]]) {
+        process.env[match[1]] = match[2]
+      }
+    }
+  }
+
+  // Load auth.json (legacy)
   const authPath = resolve(AGENT_DIR, 'auth.json')
   if (existsSync(authPath)) {
     const auth = JSON.parse(readFileSync(authPath, 'utf-8'))
     if (auth.anthropic?.token && !process.env.ANTHROPIC_API_KEY) {
       process.env.ANTHROPIC_API_KEY = auth.anthropic.token
     }
+  }
+
+  // Env normalization — derive missing keys from the surviving one
+  const proxyToken = process.env.ANTHROPIC_API_KEY
+  if (proxyToken) {
+    if (!process.env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = proxyToken
+    if (!process.env.GOOGLE_API_KEY) process.env.GOOGLE_API_KEY = proxyToken
+    if (!process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = proxyToken
+    if (!process.env.KIMI_API_KEY) process.env.KIMI_API_KEY = proxyToken
+  }
+  const proxyBase = process.env.ANTHROPIC_BASE_URL
+  if (proxyBase) {
+    if (!process.env.GEMINI_BASE_URL) process.env.GEMINI_BASE_URL = proxyBase + '/google'
+    if (!process.env.OPENAI_BASE_URL) process.env.OPENAI_BASE_URL = proxyBase + '/openai'
+    if (!process.env.KIMI_BASE_URL) process.env.KIMI_BASE_URL = proxyBase + '/moonshot'
   }
 
   const model = getModel('google', 'gemini-3.1-flash-lite-preview')

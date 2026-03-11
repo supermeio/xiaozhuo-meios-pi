@@ -54,13 +54,45 @@ mkdirSync(AGENT_DIR, { recursive: true })
 mkdirSync(SESSIONS_DIR, { recursive: true })
 setWorkspaceRoot(WORKSPACE)
 
-// ── Load API key ────────────────────────────────────────────
+// ── Load .env file (persisted by provisioning / token rotation) ──
+const envFilePath = resolve(PROJECT_ROOT, '.env.token')
+if (existsSync(envFilePath)) {
+  for (const line of readFileSync(envFilePath, 'utf-8').split('\n')) {
+    const match = line.match(/^([A-Z_]+)=(.+)$/)
+    if (match && !process.env[match[1]]) {
+      process.env[match[1]] = match[2]
+    }
+  }
+}
+
+// ── Load auth.json (legacy) ──
 const authPath = resolve(AGENT_DIR, 'auth.json')
 if (existsSync(authPath)) {
   const auth = JSON.parse(readFileSync(authPath, 'utf-8'))
   if (auth.anthropic?.token && !process.env.ANTHROPIC_API_KEY) {
     process.env.ANTHROPIC_API_KEY = auth.anthropic.token
   }
+}
+
+// ── Env normalization ────────────────────────────────────────
+// Daytona may only persist ANTHROPIC_API_KEY after restarts.
+// All providers share the same sandbox proxy token, so derive
+// missing keys from the one that survived.
+const proxyToken = process.env.ANTHROPIC_API_KEY
+if (proxyToken) {
+  // pi-ai SDK reads GEMINI_API_KEY for Google provider
+  if (!process.env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = proxyToken
+  if (!process.env.GOOGLE_API_KEY) process.env.GOOGLE_API_KEY = proxyToken
+  if (!process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = proxyToken
+  if (!process.env.KIMI_API_KEY) process.env.KIMI_API_KEY = proxyToken
+}
+
+// Derive provider base URLs from ANTHROPIC_BASE_URL (all go through same proxy)
+const proxyBase = process.env.ANTHROPIC_BASE_URL
+if (proxyBase) {
+  if (!process.env.GEMINI_BASE_URL) process.env.GEMINI_BASE_URL = proxyBase + '/google'
+  if (!process.env.OPENAI_BASE_URL) process.env.OPENAI_BASE_URL = proxyBase + '/openai'
+  if (!process.env.KIMI_BASE_URL) process.env.KIMI_BASE_URL = proxyBase + '/moonshot'
 }
 
 // ── Model ───────────────────────────────────────────────────
@@ -75,7 +107,7 @@ if (process.env.GEMINI_BASE_URL) {
   ;(model as any).baseUrl = process.env.GEMINI_BASE_URL
 }
 
-// SEC-001: Strip sensitive env vars
+// SEC-001: Strip sensitive env vars after SDK has read them
 delete process.env.ANTHROPIC_API_KEY
 delete process.env.ANTHROPIC_BASE_URL
 delete process.env.GEMINI_API_KEY

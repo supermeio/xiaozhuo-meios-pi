@@ -54,20 +54,19 @@ mkdirSync(AGENT_DIR, { recursive: true })
 mkdirSync(SESSIONS_DIR, { recursive: true })
 setWorkspaceRoot(WORKSPACE)
 
-// ── Load .env file (persisted by provisioning / token rotation) ──
-// Search multiple locations since PROJECT_ROOT may vary depending on tsx runtime
+// ── Load .env.token (persisted by provisioning / token rotation) ──
+// This file is the source of truth — overrides Daytona env vars which
+// may be stale (e.g. old token) or incomplete after sandbox restarts.
 const envSearchPaths = [
   resolve(PROJECT_ROOT, '.env.token'),
-  resolve(import.meta.dirname, '..', '.env.token'),  // server/.env.token (if dirname = server/src)
-  resolve(import.meta.dirname, '..', '..', '.env.token'),  // project root
+  resolve(import.meta.dirname, '..', '.env.token'),
+  resolve(import.meta.dirname, '..', '..', '.env.token'),
 ]
 for (const envPath of envSearchPaths) {
   if (existsSync(envPath)) {
     for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
       const match = line.match(/^([A-Z_]+)=(.+)$/)
-      if (match && !process.env[match[1]]) {
-        process.env[match[1]] = match[2]
-      }
+      if (match) process.env[match[1]] = match[2]
     }
     break
   }

@@ -65,7 +65,7 @@ async function main() {
   console.log('🧥 meios wardrobe agent starting...')
   console.log(`   workspace: ${WORKSPACE}`)
 
-  // Load .env file (persisted by provisioning / token rotation)
+  // Load .env.token (source of truth — overrides stale Daytona env vars)
   const envSearchPaths = [
     resolve(PROJECT_ROOT, '.env.token'),
     resolve(import.meta.dirname, '..', '.env.token'),
@@ -75,9 +75,7 @@ async function main() {
     if (existsSync(envPath)) {
       for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
         const match = line.match(/^([A-Z_]+)=(.+)$/)
-        if (match && !process.env[match[1]]) {
-          process.env[match[1]] = match[2]
-        }
+        if (match) process.env[match[1]] = match[2]
       }
       break
     }

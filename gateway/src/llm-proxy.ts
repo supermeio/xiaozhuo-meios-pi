@@ -51,7 +51,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     extractModel: (_path, body) => body?.model ?? null,
   },
   moonshot: {
-    upstream: 'https://api.moonshot.ai/anthropic',
+    upstream: 'https://api.kimi.com/coding',
     setAuth: (h, key) => h.set('x-api-key', key),
     extractUsage: (b) => ({
       input: b?.usage?.input_tokens ?? 0,

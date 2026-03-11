@@ -88,7 +88,7 @@ async function main() {
   // Strip sensitive env vars now that SDK has read them
   delete process.env.ANTHROPIC_API_KEY
   delete process.env.ANTHROPIC_BASE_URL
-  delete process.env.GEMINI_API_KEY
+  delete process.env.GOOGLE_API_KEY
   delete process.env.GEMINI_BASE_URL
   delete process.env.OPENAI_API_KEY
   delete process.env.OPENAI_BASE_URL

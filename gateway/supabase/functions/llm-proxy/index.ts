@@ -40,7 +40,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
   },
   google: {
     upstream: 'https://generativelanguage.googleapis.com',
-    envKey: 'GEMINI_API_KEY',
+    envKey: 'GOOGLE_API_KEY',
     setAuth: (h, key) => { h.set('x-goog-api-key', key) },
     extractUsage: (b) => ({
       input: b?.usageMetadata?.promptTokenCount ?? 0,
@@ -62,7 +62,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     extractModel: (_p, body) => body?.model ?? null,
   },
   moonshot: {
-    upstream: 'https://api.moonshot.ai/anthropic',
+    upstream: 'https://api.kimi.com/coding',
     envKey: 'KIMI_API_KEY',
     setAuth: (h, key) => { h.set('x-api-key', key) },
     extractUsage: (b) => ({

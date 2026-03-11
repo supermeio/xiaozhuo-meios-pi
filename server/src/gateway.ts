@@ -78,7 +78,7 @@ if (process.env.GEMINI_BASE_URL) {
 // SEC-001: Strip sensitive env vars
 delete process.env.ANTHROPIC_API_KEY
 delete process.env.ANTHROPIC_BASE_URL
-delete process.env.GEMINI_API_KEY
+delete process.env.GOOGLE_API_KEY
 delete process.env.GEMINI_BASE_URL
 delete process.env.OPENAI_API_KEY
 delete process.env.OPENAI_BASE_URL

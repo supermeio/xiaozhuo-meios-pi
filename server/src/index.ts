@@ -83,6 +83,10 @@ async function main() {
     ;(model as any).baseUrl = process.env.ANTHROPIC_BASE_URL
   }
 
+  // Strip sensitive env vars now that SDK has read them
+  delete process.env.ANTHROPIC_API_KEY
+  delete process.env.ANTHROPIC_BASE_URL
+
   console.log(`   model: ${model.name} (${model.id})`)
   console.log('')
 

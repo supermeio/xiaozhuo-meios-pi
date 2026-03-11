@@ -83,9 +83,13 @@ async function forwardRequest(c: Context, targetUrl: string): Promise<Response> 
 
   const init: RequestInit = { method, headers }
 
-  // Forward body for methods that have one
+  // Forward body for methods that have one (with size limit)
   if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
-    init.body = await c.req.text()
+    const body = await c.req.text()
+    if (body.length > 524288) { // 512 KB
+      return c.json({ ok: false, error: 'Request body too large' }, 413)
+    }
+    init.body = body
   }
 
   try {

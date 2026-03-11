@@ -73,6 +73,12 @@ if (process.env.ANTHROPIC_BASE_URL) {
   ;(model as any).baseUrl = process.env.ANTHROPIC_BASE_URL
 }
 
+// SEC-001: Strip sensitive env vars now that the SDK has read them into memory.
+// This prevents users from extracting the sandbox token via agent shell tools
+// (e.g., "echo $ANTHROPIC_API_KEY" or "cat /proc/self/environ").
+delete process.env.ANTHROPIC_API_KEY
+delete process.env.ANTHROPIC_BASE_URL
+
 // ── Init cron & heartbeat ───────────────────────────────────
 initCron(WORKSPACE)
 initHeartbeat(WORKSPACE)
@@ -96,11 +102,23 @@ function fail(res: ServerResponse, error: string, status = 400) {
   res.end(JSON.stringify({ ok: false, error }))
 }
 
+const MAX_BODY_SIZE = 524288 // 512 KB
+
 function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
-    req.on('data', (c) => chunks.push(c))
+    let size = 0
+    req.on('data', (c: Buffer) => {
+      size += c.length
+      if (size > MAX_BODY_SIZE) {
+        req.destroy()
+        reject(new Error('Request body too large'))
+        return
+      }
+      chunks.push(c)
+    })
     req.on('end', () => resolve(Buffer.concat(chunks).toString()))
+    req.on('error', reject)
   })
 }
 
@@ -208,7 +226,13 @@ function loadSystemPrompt(): string {
 
 const sessionCache = new Map<string, any>()
 
+const SESSION_ID_RE = /^s-\d+-[a-z0-9]+$/
+
 async function getOrCreateSession(sessionId?: string) {
+  if (sessionId && !SESSION_ID_RE.test(sessionId)) {
+    throw new Error('Invalid session ID')
+  }
+
   if (sessionId && sessionCache.has(sessionId)) {
     return { session: sessionCache.get(sessionId)!, sessionId }
   }
@@ -306,7 +330,15 @@ const server = createServer(async (req, res) => {
 
     // ── POST /chat ──
     if (url.pathname === '/chat' && method === 'POST') {
-      const body = JSON.parse(await readBody(req))
+      let rawBody: string
+      try {
+        rawBody = await readBody(req)
+      } catch (err: any) {
+        fail(res, err.message, 413)
+        return
+      }
+
+      const body = JSON.parse(rawBody)
       const { message, sessionId: reqSessionId } = body
 
       if (!message || typeof message !== 'string') {
@@ -314,7 +346,13 @@ const server = createServer(async (req, res) => {
         return
       }
 
-      const { session, sessionId } = await getOrCreateSession(reqSessionId)
+      let session: any, sessionId: string
+      try {
+        ({ session, sessionId } = await getOrCreateSession(reqSessionId))
+      } catch (err: any) {
+        fail(res, err.message, 400)
+        return
+      }
       const reply = await chat(session, message)
       ok(res, { reply, sessionId })
       return
@@ -349,6 +387,7 @@ const server = createServer(async (req, res) => {
     const messagesMatch = url.pathname.match(/^\/sessions\/([^/]+)\/messages$/)
     if (messagesMatch && method === 'GET') {
       const sessId = messagesMatch[1]
+      if (!SESSION_ID_RE.test(sessId)) { fail(res, 'Invalid session ID', 400); return }
       const sessDir = resolve(SESSIONS_DIR, sessId)
 
       if (!existsSync(sessDir)) {
@@ -365,6 +404,7 @@ const server = createServer(async (req, res) => {
     const deleteMatch = url.pathname.match(/^\/sessions\/([^/]+)$/)
     if (deleteMatch && method === 'DELETE') {
       const sessId = deleteMatch[1]
+      if (!SESSION_ID_RE.test(sessId)) { fail(res, 'Invalid session ID', 400); return }
       const sessDir = resolve(SESSIONS_DIR, sessId)
 
       if (!existsSync(sessDir)) {

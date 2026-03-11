@@ -201,7 +201,7 @@ async function rotateToken(sandbox: Sandbox): Promise<void> {
   try { await sb.process.deleteSession('gateway') } catch {}
   await sb.process.createSession('gateway')
   await sb.process.executeSessionCommand('gateway', {
-    command: 'cd /home/daytona/meios/server && export $(cat /home/daytona/meios/.env.token) && node --import tsx src/gateway.ts 2>&1',
+    command: 'cd /home/daytona/meios/server && export $(cat /home/daytona/meios/.env.token) && rm -f /home/daytona/meios/.env.token && node --import tsx src/gateway.ts 2>&1',
     runAsync: true,
   })
 

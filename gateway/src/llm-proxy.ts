@@ -81,12 +81,27 @@ export async function llmProxy(c: Context): Promise<Response> {
   }
 
   try {
-    const body = await c.req.text()
-
-    // Check body size when Content-Length was not provided
-    if (!contentLength && body.length > MAX_BODY_SIZE) {
-      return c.json({ ok: false, error: 'Request body too large' }, 413)
+    // Read body with streaming size limit (defends against chunked requests without Content-Length)
+    const reader = c.req.raw.body?.getReader()
+    if (!reader) {
+      return c.json({ ok: false, error: 'Missing request body' }, 400)
     }
+    const chunks: Uint8Array[] = []
+    let totalSize = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalSize += value.length
+      if (totalSize > MAX_BODY_SIZE) {
+        reader.cancel()
+        return c.json({ ok: false, error: 'Request body too large' }, 413)
+      }
+      chunks.push(value)
+    }
+    const merged = new Uint8Array(totalSize)
+    let offset = 0
+    for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length }
+    const body = new TextDecoder().decode(merged)
 
     // Model allowlist
     let bodyObj: any = null

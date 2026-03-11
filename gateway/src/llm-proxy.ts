@@ -1,6 +1,7 @@
 import type { Context } from 'hono'
 import { getSandboxByToken } from './db.js'
 import { config } from './config.js'
+import { logError } from './log.js'
 
 const ANTHROPIC_API = 'https://api.anthropic.com'
 const MAX_BODY_SIZE = 524288 // 512 KB
@@ -98,7 +99,7 @@ export async function llmProxy(c: Context): Promise<Response> {
       },
     })
   } catch (err: any) {
-    console.error('[llm-proxy] error:', err.message)
+    logError('llm-proxy', 'upstream request failed', err)
     return c.json({ ok: false, error: `LLM proxy error: ${err.message}` }, 502)
   }
 }

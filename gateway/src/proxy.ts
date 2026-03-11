@@ -2,6 +2,7 @@ import type { Context } from 'hono'
 import type { AuthUser } from './auth.js'
 import type { Sandbox } from './db.js'
 import { resolveSignedUrl, forceRefreshSignedUrl, provisionSandbox } from './sandbox.js'
+import { logError } from './log.js'
 
 // In-flight provision locks: prevents duplicate sandbox creation when
 // concurrent requests arrive for the same user before a sandbox exists.
@@ -38,7 +39,7 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
         signedUrl = result.signedUrl
       }
     } catch (err: any) {
-      console.error(`[proxy] auto-provision failed for ${user.id}:`, err.message)
+      logError('proxy', 'auto-provision failed', err, { userId: user.id })
       return c.json(
         { ok: false, error: 'Failed to provision sandbox. Please try again later.' },
         503

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { Daytona, Image } from '@daytonaio/sdk'
 import { getSandboxByUserId, updateSignedUrl, upsertSandbox, type Sandbox } from './db.js'
 import { config } from './config.js'
+import { log } from './log.js'
 
 const SIGNED_URL_TTL = 86400 // 24 hours
 const REFRESH_BUFFER = 3600  // refresh 1 hour before expiry
@@ -15,7 +16,7 @@ function getDaytona(): Daytona {
   return _daytona
 }
 
-function log(msg: string) { console.log(`[sandbox] ${msg}`) }
+function slog(msg: string, data?: Record<string, unknown>) { log('sandbox', msg, data) }
 
 /**
  * Resolve the signed preview URL for a user's sandbox.
@@ -66,7 +67,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
   const daytona = getDaytona()
   const port = config.meios.gatewayPort
 
-  log(`provisioning sandbox for user ${userId}...`)
+  slog(`provisioning sandbox for user ${userId}...`)
 
   // Generate a per-sandbox token for LLM proxy auth
   // TODO: hash tokens with SHA-256 before storing/querying. Store hash in DB, compare hash(input) == stored_hash. Add token expiry column.
@@ -88,10 +89,10 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     timeout: 120,
   })
 
-  log(`sandbox created: ${sb.id}`)
+  slog(`sandbox created: ${sb.id}`)
 
   // 2. Clone repo & install
-  log('cloning meios repo and installing deps...')
+  slog('cloning meios repo and installing deps...')
   const setupCmd = [
     'apt-get update -qq && apt-get install -y -qq git > /dev/null 2>&1',
     `git clone --depth 1 ${config.meios.repoUrl} /home/daytona/meios`,
@@ -100,27 +101,32 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 
   const installResult = await sb.process.executeCommand(setupCmd, undefined, undefined, 300)
   if (installResult.exitCode !== 0) {
-    log(`setup failed: ${installResult.result}`)
+    slog(`setup failed: ${installResult.result}`)
     throw new Error(`Sandbox setup failed: ${installResult.result.slice(0, 200)}`)
   }
-  log('deps installed')
+  slog('deps installed')
 
   // 3. Start gateway in background session
-  log('starting gateway...')
+  slog('starting gateway...')
   await sb.process.createSession('gateway')
   await sb.process.executeSessionCommand('gateway', {
     command: `cd /home/daytona/meios/server && node --import tsx src/gateway.ts 2>&1`,
     runAsync: true,
   })
 
-  // Brief wait for gateway startup
-  await new Promise(r => setTimeout(r, 3000))
-
-  // Verify health (node:20-slim has no curl)
-  const health = await sb.process.executeCommand(
-    `node -e "const h=require('http');h.get('http://localhost:${port}/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>console.log(d))}).on('error',e=>console.error(e.message))"`,
-  )
-  log(`health check: ${health.result}`)
+  // Poll health until ready (max 30 seconds)
+  const HEALTH_CMD = `node -e "const h=require('http');h.get('http://localhost:${port}/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>console.log(d))}).on('error',e=>console.error(e.message))"`
+  for (let i = 0; i < 15; i++) {
+    await new Promise(r => setTimeout(r, 2000))
+    const health = await sb.process.executeCommand(HEALTH_CMD)
+    if (health.exitCode === 0 && health.result.includes('"ok":true')) {
+      slog(`health check passed on attempt ${i + 1}`)
+      break
+    }
+    if (i === 14) {
+      slog(`health check did not pass after 15 attempts: ${health.result}`)
+    }
+  }
 
   // 4. Get signed URL
   const result = await sb.getSignedPreviewUrl(port, SIGNED_URL_TTL)
@@ -138,7 +144,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     status: 'active',
   })
 
-  log(`sandbox provisioned for user ${userId}: ${sb.id}`)
+  slog(`sandbox provisioned for user ${userId}: ${sb.id}`)
   return { sandbox, signedUrl }
 }
 

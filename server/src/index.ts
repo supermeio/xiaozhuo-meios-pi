@@ -14,6 +14,23 @@ import { resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 
+// ── pi-agent event types ──
+
+interface ContentBlock {
+  type: string
+  text?: string
+}
+
+interface AgentMessage {
+  content?: ContentBlock[]
+}
+
+interface AgentEvent {
+  type: string
+  assistantMessageEvent?: { type: string; delta?: string }
+  messages?: AgentMessage[]
+}
+
 // ── Config ──
 const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
 const WORKSPACE = resolve(PROJECT_ROOT, 'workspace')
@@ -59,7 +76,9 @@ async function main() {
 
   const model = getModel('anthropic', 'claude-haiku-4-5')
 
-  // Override base URL if proxying through gateway (system key stays server-side)
+  // pi-ai SDK hardcodes baseUrl in getModel(). Override to route through
+  // LLM proxy so the real API key never enters the sandbox.
+  // Track: https://github.com/mariozechner/pi-ai/issues/XXX (SDK limitation)
   if (process.env.ANTHROPIC_BASE_URL) {
     ;(model as any).baseUrl = process.env.ANTHROPIC_BASE_URL
   }
@@ -83,7 +102,7 @@ async function main() {
     return new Promise<string>((resolveText) => {
       const textChunks: string[] = []
 
-      const unsub = session.subscribe((event: any) => {
+      const unsub = session.subscribe((event: AgentEvent) => {
         // Collect only text deltas (skip thinking)
         if (event.type === 'message_update') {
           const evt = event.assistantMessageEvent
@@ -100,9 +119,9 @@ async function main() {
           } else {
             // Fallback: extract from final messages
             const text = (event.messages ?? [])
-              .flatMap((m: any) => m.content ?? [])
-              .filter((b: any) => b.type === 'text')
-              .map((b: any) => b.text)
+              .flatMap((m: AgentMessage) => m.content ?? [])
+              .filter((b: ContentBlock) => b.type === 'text')
+              .map((b: ContentBlock) => b.text)
               .join('')
             resolveText(text || '[无回复]')
           }

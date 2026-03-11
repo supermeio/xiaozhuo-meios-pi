@@ -63,7 +63,10 @@ function startTask(id: string) {
   // Stop existing timer if any
   stopTask(id)
 
+  let running = false
   const run = async () => {
+    if (running) return
+    running = true
     try {
       const result = await task.handler()
       task.lastRun = Date.now()
@@ -71,6 +74,8 @@ function startTask(id: string) {
       if (result) console.log(`[cron:${id}] ${result}`)
     } catch (err: any) {
       console.error(`[cron:${id}] error:`, err.message)
+    } finally {
+      running = false
     }
   }
 

@@ -36,6 +36,11 @@ export const saveClothingTool: ToolDefinition<typeof SaveClothingParams, string>
   description: '将一件衣物保存到用户的衣橱。在用户描述或上传衣物照片后调用此工具记录衣物信息。',
   parameters: SaveClothingParams,
   async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    const id = params.id as string
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || id.length > 80) {
+      return textResult('Invalid clothing ID. Use lowercase letters, numbers, and hyphens only.', '')
+    }
+
     const dir = ws('closet')
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 
@@ -113,6 +118,11 @@ export const getClothingTool: ToolDefinition<typeof GetClothingParams, string> =
   description: '查看衣橱中某件衣物的详细信息。',
   parameters: GetClothingParams,
   async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    const id = params.id as string
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || id.length > 80) {
+      return textResult('Invalid clothing ID. Use lowercase letters, numbers, and hyphens only.', '')
+    }
+
     const filePath = ws('closet', `${params.id}.md`)
     if (!existsSync(filePath)) {
       return textResult(`找不到衣物「${params.id}」。`, '')

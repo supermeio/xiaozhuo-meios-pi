@@ -21,7 +21,7 @@ export const config = {
     anthropicKey: required('ANTHROPIC_API_KEY'),
     // LLM proxy URL for sandboxes (Supabase Edge Function — whitelisted by Daytona)
     llmProxyUrl: process.env.MEIOS_LLM_PROXY_URL
-      ?? `${process.env.SUPABASE_URL ?? 'https://exyqukzhnjhbypakhlsp.supabase.co'}/functions/v1/llm-proxy`,
+      ?? `${required('SUPABASE_URL')}/functions/v1/llm-proxy`,
     gatewayPort: 18800,
   },
 } as const

@@ -24,7 +24,11 @@ export function initHeartbeat(workspace: string, chatFn?: (input: string) => Pro
       if (suggestions) {
         // Save to a file so next chat can pick it up
         const outPath = resolve(workspaceRoot, 'memory', 'heartbeat-pending.md')
-        writeFileSync(outPath, `# 待告知用户\n\n${suggestions}\n\n_生成时间: ${new Date().toISOString()}_\n`)
+        const existing = existsSync(outPath) ? readFileSync(outPath, 'utf-8') : ''
+        const content = existing
+          ? existing.replace(/_生成时间:.*_\n?$/, '') + '\n---\n\n' + suggestions
+          : suggestions
+        writeFileSync(outPath, `# 待告知用户\n\n${content}\n\n_生成时间: ${new Date().toISOString()}_\n`)
         return `有新建议待告知`
       }
       return 'nothing to report'

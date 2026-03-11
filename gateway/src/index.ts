@@ -5,12 +5,13 @@ import { config } from './config.js'
 import { authMiddleware } from './auth.js'
 import { proxyToSandbox } from './proxy.js'
 import { llmProxy } from './llm-proxy.js'
+import { log } from './log.js'
 
 const app = new Hono()
 
 // ── CORS ──
 app.use('*', cors({
-  origin: '*',
+  origin: process.env.CORS_ORIGIN ?? '*',
   allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'anthropic-version', 'anthropic-beta'],
 }))
@@ -34,8 +35,8 @@ app.all('/*', proxyToSandbox)
 // ── Start ──
 
 serve({ fetch: app.fetch, port: config.port }, (info) => {
-  console.log(`meios auth gateway running`)
-  console.log(`  http://0.0.0.0:${info.port}`)
-  console.log(`  supabase: ${config.supabase.url}`)
-  console.log('')
+  log('gateway', 'meios auth gateway running', {
+    port: info.port,
+    supabase: config.supabase.url,
+  })
 })

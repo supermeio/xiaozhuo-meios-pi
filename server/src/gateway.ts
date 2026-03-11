@@ -25,6 +25,23 @@ import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 import { initCron, listTasks } from './cron.js'
 import { initHeartbeat } from './heartbeat.js'
 
+// ── pi-agent event types ────────────────────────────────────
+
+interface ContentBlock {
+  type: string
+  text?: string
+}
+
+interface AgentMessage {
+  content?: ContentBlock[]
+}
+
+interface AgentEvent {
+  type: string
+  assistantMessageEvent?: { type: string; delta?: string }
+  messages?: AgentMessage[]
+}
+
 // ── Config ──────────────────────────────────────────────────
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '18800')
 const VERSION = '0.1.0'
@@ -49,7 +66,9 @@ if (existsSync(authPath)) {
 // ── Model ───────────────────────────────────────────────────
 const model = getModel('anthropic', 'claude-haiku-4-5')
 
-// Override base URL if proxying through gateway (system key stays server-side)
+// pi-ai SDK hardcodes baseUrl in getModel(). Override to route through
+// LLM proxy so the real API key never enters the sandbox.
+// Track: https://github.com/mariozechner/pi-ai/issues/XXX (SDK limitation)
 if (process.env.ANTHROPIC_BASE_URL) {
   ;(model as any).baseUrl = process.env.ANTHROPIC_BASE_URL
 }
@@ -125,8 +144,8 @@ function parseJsonlMessages(content: string): ParsedMessage[] {
 
       // Extract text from content blocks, skip thinking/toolCall/etc
       const text = blocks
-        .filter((b: any) => b.type === 'text' && typeof b.text === 'string')
-        .map((b: any) => b.text)
+        .filter((b: ContentBlock) => b.type === 'text' && typeof b.text === 'string')
+        .map((b: ContentBlock) => b.text)
         .join('\n')
 
       // Skip empty text results
@@ -230,7 +249,7 @@ async function chat(session: any, input: string): Promise<string> {
   return new Promise<string>((resolveText) => {
     const textChunks: string[] = []
 
-    const unsub = session.subscribe((event: any) => {
+    const unsub = session.subscribe((event: AgentEvent) => {
       if (event.type === 'message_update') {
         const evt = event.assistantMessageEvent
         if (evt?.type === 'text_delta' && evt.delta) {
@@ -243,9 +262,9 @@ async function chat(session: any, input: string): Promise<string> {
           resolveText(textChunks.join(''))
         } else {
           const text = (event.messages ?? [])
-            .flatMap((m: any) => m.content ?? [])
-            .filter((b: any) => b.type === 'text')
-            .map((b: any) => b.text)
+            .flatMap((m: AgentMessage) => m.content ?? [])
+            .filter((b: ContentBlock) => b.type === 'text')
+            .map((b: ContentBlock) => b.text)
             .join('')
           resolveText(text || '[无回复]')
         }

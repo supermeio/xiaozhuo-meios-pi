@@ -1,30 +1,110 @@
 /**
- * Supabase Edge Function: LLM Proxy
+ * Supabase Edge Function: LLM Proxy (Multi-Provider)
  *
- * Validates sandbox token, forwards request to Anthropic API with the real key.
+ * Validates sandbox token, checks rate limits & budget, then forwards
+ * to the appropriate upstream LLM provider.
+ *
+ * Provider routing by path prefix:
+ *   /v1/messages*        → Anthropic (default, no prefix)
+ *   /google/*            → Google Gemini
+ *   /openai/*            → OpenAI
+ *   /moonshot/*          → Moonshot (Kimi)
+ *
  * Deployed at: https://<project>.supabase.co/functions/v1/llm-proxy
- *
- * The sandbox sends requests here instead of directly to api.anthropic.com,
- * so the real ANTHROPIC_API_KEY never enters the sandbox.
  */
 
 import { createClient } from "npm:@supabase/supabase-js@2"
 
-const ANTHROPIC_API = "https://api.anthropic.com"
-const MAX_BODY_SIZE = 524288 // 512 KB
+/* ───────────────────────── Provider configuration ───────────────────────── */
 
-const ALLOWED_MODELS = [
-  "claude-haiku-4-5-20251001",
-  "claude-haiku-4-5",
-  "claude-opus-4-6",
-]
+interface ProviderConfig {
+  upstream: string
+  envKey: string
+  setAuth: (headers: Headers, key: string) => void
+  extractUsage: (body: any) => { input: number; output: number }
+  pathAllowlist: RegExp
+  extractModel: (path: string, body: any) => string | null
+}
+
+const PROVIDERS: Record<string, ProviderConfig> = {
+  anthropic: {
+    upstream: 'https://api.anthropic.com',
+    envKey: 'ANTHROPIC_API_KEY',
+    setAuth: (h, key) => { h.set('x-api-key', key) },
+    extractUsage: (b) => ({
+      input: b?.usage?.input_tokens ?? 0,
+      output: b?.usage?.output_tokens ?? 0,
+    }),
+    pathAllowlist: /^\/v1\/messages(\/count_tokens|\/batches(\/.*)?)?$/,
+    extractModel: (_p, body) => body?.model ?? null,
+  },
+  google: {
+    upstream: 'https://generativelanguage.googleapis.com',
+    envKey: 'GEMINI_API_KEY',
+    setAuth: (h, key) => { h.set('x-goog-api-key', key) },
+    extractUsage: (b) => ({
+      input: b?.usageMetadata?.promptTokenCount ?? 0,
+      output: (b?.usageMetadata?.candidatesTokenCount ?? 0) +
+              (b?.usageMetadata?.thoughtsTokenCount ?? 0),
+    }),
+    pathAllowlist: /^\/v1beta\/models\/[\w.-]+:(generateContent|streamGenerateContent|countTokens)$/,
+    extractModel: (path) => path.match(/\/models\/([\w.-]+):/)?.[1] ?? null,
+  },
+  openai: {
+    upstream: 'https://api.openai.com',
+    envKey: 'OPENAI_API_KEY',
+    setAuth: (h, key) => { h.set('Authorization', `Bearer ${key}`) },
+    extractUsage: (b) => ({
+      input: b?.usage?.prompt_tokens ?? b?.usage?.input_tokens ?? 0,
+      output: b?.usage?.completion_tokens ?? b?.usage?.output_tokens ?? 0,
+    }),
+    pathAllowlist: /^\/v1\/(chat\/completions|responses|embeddings)$/,
+    extractModel: (_p, body) => body?.model ?? null,
+  },
+  moonshot: {
+    upstream: 'https://api.moonshot.ai/anthropic',
+    envKey: 'KIMI_API_KEY',
+    setAuth: (h, key) => { h.set('x-api-key', key) },
+    extractUsage: (b) => ({
+      input: b?.usage?.input_tokens ?? 0,
+      output: b?.usage?.output_tokens ?? 0,
+    }),
+    pathAllowlist: /^\/v1\/messages(\/count_tokens)?$/,
+    extractModel: (_p, body) => body?.model ?? null,
+  },
+}
+
+/* ─────────────────────── Model allowlist per provider ────────────────────── */
+
+const ALLOWED_MODELS: Record<string, string[]> = {
+  anthropic: ['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'claude-opus-4-6'],
+  google: [
+    'gemini-3.1-flash-lite-preview', 'gemini-2.5-flash-lite', 'gemini-2.5-flash',
+    'gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-flash-lite-latest',
+  ],
+  openai: ['gpt-4.1-nano', 'gpt-4.1-mini', 'gpt-4.1', 'gpt-5-nano', 'gpt-5-mini'],
+  moonshot: ['kimi-k2.5', 'k2p5'],
+}
+
+/* ──────────────────────────── Pricing table ──────────────────────────────── */
 
 const MODEL_PRICING: Record<string, { inputPer1M: number; outputPer1M: number }> = {
-  'gemini-3.1-flash-lite': { inputPer1M: 25, outputPer1M: 150 },
+  'gemini-3.1-flash-lite-preview': { inputPer1M: 25, outputPer1M: 150 },
+  'gemini-2.5-flash-lite': { inputPer1M: 25, outputPer1M: 150 },
+  'gemini-2.5-flash': { inputPer1M: 150, outputPer1M: 600 },
+  'gemini-2.5-pro': { inputPer1M: 125, outputPer1M: 1000 },
+  'gemini-3-flash-preview': { inputPer1M: 150, outputPer1M: 600 },
+  'gemini-flash-lite-latest': { inputPer1M: 25, outputPer1M: 150 },
   'kimi-k2.5': { inputPer1M: 60, outputPer1M: 300 },
+  'k2p5': { inputPer1M: 60, outputPer1M: 300 },
   'claude-haiku-4-5-20251001': { inputPer1M: 80, outputPer1M: 400 },
   'claude-haiku-4-5': { inputPer1M: 80, outputPer1M: 400 },
   'claude-opus-4-6': { inputPer1M: 1500, outputPer1M: 7500 },
+  'gpt-4.1-nano': { inputPer1M: 10, outputPer1M: 40 },
+  'gpt-4.1-mini': { inputPer1M: 40, outputPer1M: 160 },
+  'gpt-4.1': { inputPer1M: 200, outputPer1M: 800 },
+  'gpt-5-nano': { inputPer1M: 10, outputPer1M: 40 },
+  'gpt-5-mini': { inputPer1M: 40, outputPer1M: 160 },
 }
 
 function calculateCostCents(model: string, inputTokens: number, outputTokens: number): number {
@@ -33,12 +113,47 @@ function calculateCostCents(model: string, inputTokens: number, outputTokens: nu
   return (inputTokens * pricing.inputPer1M + outputTokens * pricing.outputPer1M) / 1_000_000
 }
 
+/* ──────────────────────────── Provider detection ─────────────────────────── */
+
+function detectProvider(path: string): { provider: string; upstreamPath: string } | null {
+  if (path.startsWith('/google/')) return { provider: 'google', upstreamPath: path.slice('/google'.length) }
+  if (path.startsWith('/openai/')) return { provider: 'openai', upstreamPath: path.slice('/openai'.length) }
+  if (path.startsWith('/moonshot/')) return { provider: 'moonshot', upstreamPath: path.slice('/moonshot'.length) }
+  if (/^\/v1\/messages/.test(path)) return { provider: 'anthropic', upstreamPath: path }
+  return null
+}
+
+/* ──────────────────────── Token extraction (unified) ─────────────────────── */
+
+function extractToken(req: Request): string | null {
+  const xApiKey = req.headers.get('x-api-key')
+  if (xApiKey) return xApiKey
+
+  const googKey = req.headers.get('x-goog-api-key')
+  if (googKey) return googKey
+
+  const authHeader = req.headers.get('Authorization')
+  if (authHeader?.startsWith('Bearer ')) return authHeader.slice(7)
+
+  const url = new URL(req.url)
+  const queryKey = url.searchParams.get('key')
+  if (queryKey) return queryKey
+
+  return null
+}
+
+/* ─────────────────────────────── Constants ───────────────────────────────── */
+
+const MAX_BODY_SIZE = 524288 // 512 KB
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
-    "Content-Type, x-api-key, anthropic-version, anthropic-beta",
+    "Content-Type, Authorization, x-api-key, x-goog-api-key, anthropic-version, anthropic-beta",
 }
+
+/* ──────────────────────────────── Handler ────────────────────────────────── */
 
 Deno.serve(async (req) => {
   // CORS preflight
@@ -54,11 +169,11 @@ Deno.serve(async (req) => {
     )
   }
 
-  // 2. Token extraction
-  const apiKey = req.headers.get("x-api-key")
-  if (!apiKey) {
+  // 2. Token extraction (unified: x-api-key → x-goog-api-key → Bearer → ?key=)
+  const sandboxToken = extractToken(req)
+  if (!sandboxToken) {
     return Response.json(
-      { ok: false, error: "Missing x-api-key header" },
+      { ok: false, error: "Missing authentication token" },
       { status: 401, headers: CORS_HEADERS },
     )
   }
@@ -68,10 +183,9 @@ Deno.serve(async (req) => {
   const supabase = createClient(supabaseUrl, supabaseKey)
 
   // 3. Token hash (SHA-256) + validation with expiry check
-  const encoder = new TextEncoder()
   const hashBuffer = await crypto.subtle.digest(
     "SHA-256",
-    encoder.encode(apiKey),
+    new TextEncoder().encode(sandboxToken),
   )
   const hashedToken = Array.from(new Uint8Array(hashBuffer))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -94,7 +208,7 @@ Deno.serve(async (req) => {
     )
   }
 
-  // Budget check
+  // 4. Budget check
   const { data: budget } = await supabase.rpc("check_budget", { p_user_id: sandbox.user_id })
   if (budget && !budget.allowed) {
     return Response.json(
@@ -103,7 +217,7 @@ Deno.serve(async (req) => {
     )
   }
 
-  // 4. Rate limit check (per-sandbox, via Supabase DB RPC)
+  // 5. Rate limit check (per-sandbox)
   const { data: rl } = await supabase.rpc("check_rate_limit", {
     p_sandbox_id: sandbox.id,
     p_minute_limit: 60,
@@ -116,7 +230,7 @@ Deno.serve(async (req) => {
     )
   }
 
-  // 5. Request body size limit
+  // 6. Body size limit (Content-Length header)
   const contentLength = req.headers.get("Content-Length")
   if (contentLength && parseInt(contentLength, 10) > MAX_BODY_SIZE) {
     return Response.json(
@@ -125,44 +239,42 @@ Deno.serve(async (req) => {
     )
   }
 
-  // --- Forward to Anthropic ---
-  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY")
-  if (!anthropicKey) {
-    return Response.json(
-      { ok: false, error: "LLM proxy not configured" },
-      { status: 500, headers: CORS_HEADERS },
-    )
-  }
-
-  // 7. Path allowlist
+  // 7. Provider detection
   const url = new URL(req.url)
   const path = url.pathname.replace(/^\/llm-proxy/, "") || "/v1/messages"
 
-  // Only allow specific Anthropic API paths
-  if (!/^\/v1\/messages(\/count_tokens|\/batches(\/.*)?)?$/.test(path)) {
+  const route = detectProvider(path)
+  if (!route) {
+    return Response.json(
+      { ok: false, error: "Unknown provider or path" },
+      { status: 404, headers: CORS_HEADERS },
+    )
+  }
+
+  const { provider, upstreamPath } = route
+  const config = PROVIDERS[provider]
+
+  // 8. Path allowlist
+  if (!config.pathAllowlist.test(upstreamPath)) {
     return Response.json(
       { ok: false, error: "Path not allowed" },
       { status: 403, headers: CORS_HEADERS },
     )
   }
 
-  const targetUrl = ANTHROPIC_API + path
-
-  const headers = new Headers()
-  headers.set("x-api-key", anthropicKey)
-  headers.set(
-    "anthropic-version",
-    req.headers.get("anthropic-version") ?? "2023-06-01",
-  )
-  const contentType = req.headers.get("Content-Type")
-  if (contentType) headers.set("Content-Type", contentType)
-  const beta = req.headers.get("anthropic-beta")
-  if (beta) headers.set("anthropic-beta", beta)
+  // 9. Provider API key
+  const providerKey = Deno.env.get(config.envKey)
+  if (!providerKey) {
+    return Response.json(
+      { ok: false, error: `LLM proxy not configured for ${provider}` },
+      { status: 500, headers: CORS_HEADERS },
+    )
+  }
 
   try {
     const body = await req.text()
 
-    // Check body size when Content-Length was not provided
+    // Body size limit (when Content-Length was absent)
     if (!contentLength && body.length > MAX_BODY_SIZE) {
       return Response.json(
         { ok: false, error: "Request body too large" },
@@ -170,19 +282,35 @@ Deno.serve(async (req) => {
       )
     }
 
-    // 6. Body parse + model allowlist
+    // 10. Body parse + model allowlist
     let bodyObj: any = null
-    try {
-      bodyObj = JSON.parse(body)
-    } catch {}
-    if (bodyObj?.model && !ALLOWED_MODELS.includes(bodyObj.model)) {
+    try { bodyObj = JSON.parse(body) } catch { /* non-JSON is fine for some endpoints */ }
+
+    const model = config.extractModel(upstreamPath, bodyObj)
+    const allowlist = ALLOWED_MODELS[provider] ?? []
+    if (model && !allowlist.includes(model)) {
       return Response.json(
-        { ok: false, error: `Model not allowed: ${bodyObj.model}` },
+        { ok: false, error: `Model not allowed: ${model}` },
         { status: 403, headers: CORS_HEADERS },
       )
     }
 
-    // 8. Forward to Anthropic
+    // 11. Build upstream request headers
+    const headers = new Headers()
+    config.setAuth(headers, providerKey)
+
+    const contentType = req.headers.get("Content-Type")
+    if (contentType) headers.set("Content-Type", contentType)
+
+    // Provider-specific headers
+    if (provider === 'anthropic' || provider === 'moonshot') {
+      headers.set("anthropic-version", req.headers.get("anthropic-version") ?? "2023-06-01")
+      const beta = req.headers.get("anthropic-beta")
+      if (beta) headers.set("anthropic-beta", beta)
+    }
+
+    // 12. Forward to upstream provider
+    const targetUrl = config.upstream + upstreamPath
     const upstream = await fetch(targetUrl, {
       method: "POST",
       headers,
@@ -191,25 +319,24 @@ Deno.serve(async (req) => {
 
     const responseBody = await upstream.text()
 
-    // Extract usage for billing (fire-and-forget)
+    // 13. Extract usage and record billing (fire-and-forget)
     try {
       const parsed = JSON.parse(responseBody)
-      if (parsed.usage) {
-        const inputTokens = parsed.usage.input_tokens ?? 0
-        const outputTokens = parsed.usage.output_tokens ?? 0
-        const model = bodyObj?.model ?? "unknown"
-        const costCents = calculateCostCents(model, inputTokens, outputTokens)
+      const usage = config.extractUsage(parsed)
+      if (usage.input > 0 || usage.output > 0) {
+        const modelName = model ?? "unknown"
+        const costCents = calculateCostCents(modelName, usage.input, usage.output)
         supabase.rpc("record_usage", {
           p_sandbox_id: sandbox.id,
           p_user_id: sandbox.user_id,
-          p_provider: "anthropic",
-          p_model: model,
-          p_input_tokens: inputTokens,
-          p_output_tokens: outputTokens,
+          p_provider: provider,
+          p_model: modelName,
+          p_input_tokens: usage.input,
+          p_output_tokens: usage.output,
           p_cost_cents: costCents,
         }).then(() => {}).catch(() => {}) // fire-and-forget
       }
-    } catch {} // non-JSON response — skip billing
+    } catch { /* non-JSON response — skip billing */ }
 
     return new Response(responseBody, {
       status: upstream.status,
@@ -219,7 +346,7 @@ Deno.serve(async (req) => {
       },
     })
   } catch (err) {
-    console.error("[llm-proxy] error:", err)
+    console.error(`[llm-proxy] ${provider} error:`, err)
     return Response.json(
       { ok: false, error: `LLM proxy error: ${(err as Error).message}` },
       { status: 502, headers: CORS_HEADERS },

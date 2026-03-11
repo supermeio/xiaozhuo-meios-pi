@@ -13,7 +13,7 @@ const app = new Hono()
 app.use('*', cors({
   origin: process.env.CORS_ORIGIN ?? '*',
   allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'anthropic-version', 'anthropic-beta'],
+  allowHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-goog-api-key', 'anthropic-version', 'anthropic-beta'],
 }))
 
 // ── Public routes ──
@@ -26,6 +26,9 @@ app.get('/ping', (c) => {
 
 app.post('/v1/messages', llmProxy)
 app.post('/v1/messages/*', llmProxy)
+app.post('/google/*', llmProxy)
+app.post('/openai/*', llmProxy)
+app.post('/moonshot/*', llmProxy)
 
 // ── Authenticated routes (proxy to sandbox) ──
 

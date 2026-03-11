@@ -10,9 +10,9 @@
   },
   "dependencies": {
     "@daytonaio/sdk": "^0.149.0",
-    "@mariozechner/pi-agent-core": "^0.55.3",
-    "@mariozechner/pi-ai": "^0.55.3",
-    "@mariozechner/pi-coding-agent": "^0.55.3",
+    "@mariozechner/pi-agent-core": "^0.57.1",
+    "@mariozechner/pi-ai": "^0.57.1",
+    "@mariozechner/pi-coding-agent": "^0.57.1",
     "@sinclair/typebox": "^0.34.0",
     "tsx": "^4.19.0"
   }

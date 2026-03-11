@@ -85,8 +85,18 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     autoStopInterval: 0,
     autoArchiveInterval: 10080, // 7 days
     envVars: {
+      // Anthropic — SDK reads ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY
       ANTHROPIC_BASE_URL: config.meios.llmProxyUrl,
       ANTHROPIC_API_KEY: sandboxToken,
+      // Google — SDK reads GEMINI_API_KEY; we override baseUrl in server code
+      GEMINI_BASE_URL: config.meios.llmProxyUrl + '/google',
+      GEMINI_API_KEY: sandboxToken,
+      // OpenAI — SDK reads OPENAI_API_KEY; we override baseUrl in server code
+      OPENAI_BASE_URL: config.meios.llmProxyUrl + '/openai',
+      OPENAI_API_KEY: sandboxToken,
+      // Moonshot/Kimi — uses Anthropic-compatible API
+      KIMI_BASE_URL: config.meios.llmProxyUrl + '/moonshot',
+      KIMI_API_KEY: sandboxToken,
     },
   }, {
     timeout: 120,
@@ -198,14 +208,14 @@ async function rotateToken(sandbox: Sandbox): Promise<void> {
 
   // Write token to env file that the gateway reads on startup
   await sb.process.executeCommand(
-    `echo 'ANTHROPIC_API_KEY=${newToken}' > /home/daytona/meios/.env.token`,
+    `cat > /home/daytona/meios/.env.token << 'EOF'\nANTHROPIC_API_KEY=${newToken}\nGEMINI_API_KEY=${newToken}\nOPENAI_API_KEY=${newToken}\nKIMI_API_KEY=${newToken}\nEOF`,
   )
 
   // Restart the gateway session with new env
   try { await sb.process.deleteSession('gateway') } catch {}
   await sb.process.createSession('gateway')
   await sb.process.executeSessionCommand('gateway', {
-    command: 'cd /home/daytona/meios/server && export $(cat /home/daytona/meios/.env.token) && rm -f /home/daytona/meios/.env.token && node --import tsx src/gateway.ts 2>&1',
+    command: 'cd /home/daytona/meios/server && export $(cat /home/daytona/meios/.env.token | xargs) && rm -f /home/daytona/meios/.env.token && node --import tsx src/gateway.ts 2>&1',
     runAsync: true,
   })
 

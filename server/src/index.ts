@@ -74,18 +74,26 @@ async function main() {
     }
   }
 
-  const model = getModel('anthropic', 'claude-haiku-4-5')
+  const model = getModel('google', 'gemini-3.1-flash-lite-preview')
 
-  // pi-ai SDK hardcodes baseUrl in getModel(). Override to route through
-  // LLM proxy so the real API key never enters the sandbox.
-  // Track: https://github.com/mariozechner/pi-ai/issues/XXX (SDK limitation)
+  // Override base URLs to route through LLM proxy
   if (process.env.ANTHROPIC_BASE_URL) {
-    ;(model as any).baseUrl = process.env.ANTHROPIC_BASE_URL
+    const anthropicModel = getModel('anthropic', 'claude-haiku-4-5')
+    if (anthropicModel) (anthropicModel as any).baseUrl = process.env.ANTHROPIC_BASE_URL
+  }
+  if (process.env.GEMINI_BASE_URL) {
+    ;(model as any).baseUrl = process.env.GEMINI_BASE_URL
   }
 
   // Strip sensitive env vars now that SDK has read them
   delete process.env.ANTHROPIC_API_KEY
   delete process.env.ANTHROPIC_BASE_URL
+  delete process.env.GEMINI_API_KEY
+  delete process.env.GEMINI_BASE_URL
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.KIMI_API_KEY
+  delete process.env.KIMI_BASE_URL
 
   console.log(`   model: ${model.name} (${model.id})`)
   console.log('')

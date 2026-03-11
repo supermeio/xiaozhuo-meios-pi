@@ -9,3 +9,5 @@ workspace/closet/
 workspace/memory/
 *.log
 upstream/
+env.cloudrun.yaml
+.temp/

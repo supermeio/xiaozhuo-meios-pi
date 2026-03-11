@@ -89,11 +89,11 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
       ANTHROPIC_BASE_URL: config.meios.llmProxyUrl,
       ANTHROPIC_API_KEY: sandboxToken,
       // Google — pi-ai SDK reads GEMINI_API_KEY; server code reads GOOGLE_API_KEY
-      GEMINI_BASE_URL: config.meios.llmProxyUrl + '/google',
+      GEMINI_BASE_URL: config.meios.llmProxyUrl + '/google/v1beta',
       GEMINI_API_KEY: sandboxToken,
       GOOGLE_API_KEY: sandboxToken,
-      // OpenAI — SDK reads OPENAI_API_KEY; we override baseUrl in server code
-      OPENAI_BASE_URL: config.meios.llmProxyUrl + '/openai',
+      // OpenAI — SDK reads OPENAI_API_KEY; pi-ai default baseUrl includes /v1
+      OPENAI_BASE_URL: config.meios.llmProxyUrl + '/openai/v1',
       OPENAI_API_KEY: sandboxToken,
       // Moonshot/Kimi — uses Anthropic-compatible API
       KIMI_BASE_URL: config.meios.llmProxyUrl + '/moonshot',
@@ -126,10 +126,10 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
   const envTokenLines = [
     `ANTHROPIC_BASE_URL=${proxyUrl}`,
     `ANTHROPIC_API_KEY=${sandboxToken}`,
-    `GEMINI_BASE_URL=${proxyUrl}/google`,
+    `GEMINI_BASE_URL=${proxyUrl}/google/v1beta`,
     `GEMINI_API_KEY=${sandboxToken}`,
     `GOOGLE_API_KEY=${sandboxToken}`,
-    `OPENAI_BASE_URL=${proxyUrl}/openai`,
+    `OPENAI_BASE_URL=${proxyUrl}/openai/v1`,
     `OPENAI_API_KEY=${sandboxToken}`,
     `KIMI_BASE_URL=${proxyUrl}/moonshot`,
     `KIMI_API_KEY=${sandboxToken}`,

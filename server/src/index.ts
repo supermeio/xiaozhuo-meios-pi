@@ -100,8 +100,8 @@ async function main() {
   }
   const proxyBase = process.env.ANTHROPIC_BASE_URL
   if (proxyBase) {
-    if (!process.env.GEMINI_BASE_URL) process.env.GEMINI_BASE_URL = proxyBase + '/google'
-    if (!process.env.OPENAI_BASE_URL) process.env.OPENAI_BASE_URL = proxyBase + '/openai'
+    if (!process.env.GEMINI_BASE_URL) process.env.GEMINI_BASE_URL = proxyBase + '/google/v1beta'
+    if (!process.env.OPENAI_BASE_URL) process.env.OPENAI_BASE_URL = proxyBase + '/openai/v1'
     if (!process.env.KIMI_BASE_URL) process.env.KIMI_BASE_URL = proxyBase + '/moonshot'
   }
 

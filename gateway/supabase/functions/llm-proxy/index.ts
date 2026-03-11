@@ -317,9 +317,53 @@ Deno.serve(async (req) => {
       body: body || undefined,
     })
 
-    const responseBody = await upstream.text()
+    const contentType = upstream.headers.get("Content-Type") ?? "application/json"
+    const isStreaming = contentType.includes("text/event-stream") ||
+                        contentType.includes("application/x-ndjson") ||
+                        url.searchParams.get("alt") === "sse"
 
-    // 13. Extract usage and record billing (fire-and-forget)
+    if (isStreaming && upstream.body) {
+      // 13a. Stream response through — tee the stream for billing
+      const [clientStream, billingStream] = upstream.body.tee()
+
+      // Extract usage from the streamed response in background
+      ;(async () => {
+        try {
+          const text = await new Response(billingStream).text()
+          // SSE format: lines starting with "data: " contain JSON
+          const chunks = text.split("\n")
+            .filter(l => l.startsWith("data: "))
+            .map(l => { try { return JSON.parse(l.slice(6)) } catch { return null } })
+            .filter(Boolean)
+          // Usage is typically in the last chunk
+          const lastChunk = chunks[chunks.length - 1]
+          if (lastChunk) {
+            const usage = config.extractUsage(lastChunk)
+            if (usage.input > 0 || usage.output > 0) {
+              const modelName = model ?? "unknown"
+              const costCents = calculateCostCents(modelName, usage.input, usage.output)
+              await supabase.rpc("record_usage", {
+                p_sandbox_id: sandbox.id,
+                p_user_id: sandbox.user_id,
+                p_provider: provider,
+                p_model: modelName,
+                p_input_tokens: usage.input,
+                p_output_tokens: usage.output,
+                p_cost_cents: costCents,
+              })
+            }
+          }
+        } catch { /* billing error — don't block response */ }
+      })()
+
+      return new Response(clientStream, {
+        status: upstream.status,
+        headers: { "Content-Type": contentType, ...CORS_HEADERS },
+      })
+    }
+
+    // 13b. Non-streaming: buffer and extract usage
+    const responseBody = await upstream.text()
     try {
       const parsed = JSON.parse(responseBody)
       const usage = config.extractUsage(parsed)
@@ -340,10 +384,7 @@ Deno.serve(async (req) => {
 
     return new Response(responseBody, {
       status: upstream.status,
-      headers: {
-        "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
-        ...CORS_HEADERS,
-      },
+      headers: { "Content-Type": contentType, ...CORS_HEADERS },
     })
   } catch (err) {
     console.error(`[llm-proxy] ${provider} error:`, err)

@@ -2,10 +2,12 @@ import type { Context } from 'hono'
 import { getSandboxByToken } from './db.js'
 import { config } from './config.js'
 import { logError } from './log.js'
+import { checkBudget, recordUsage } from './billing.js'
+import { calculateCostCents } from './pricing.js'
 
 const ANTHROPIC_API = 'https://api.anthropic.com'
 const MAX_BODY_SIZE = 524288 // 512 KB
-const ALLOWED_MODELS = ['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'claude-sonnet-4-5-20250514', 'claude-sonnet-4-5']
+const ALLOWED_MODELS = ['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'claude-opus-4-6']
 
 // ── In-memory per-sandbox rate limiter ──
 
@@ -49,6 +51,12 @@ export async function llmProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: 'Rate limit exceeded' }, 429, {
       'Retry-After': String(retryAfter),
     } as any)
+  }
+
+  // Budget check
+  const budget = await checkBudget(sandbox.user_id)
+  if (!budget.allowed) {
+    return c.json({ ok: false, error: 'Monthly budget exceeded', used: budget.used_cents, budget: budget.budget_cents }, 402)
   }
 
   // Request body size limit
@@ -116,8 +124,29 @@ export async function llmProxy(c: Context): Promise<Response> {
       body: body || undefined,
     })
 
-    // Stream through the response as-is
-    return new Response(upstream.body, {
+    const responseBody = await upstream.text()
+
+    // Extract usage for billing (fire-and-forget)
+    try {
+      const parsed = JSON.parse(responseBody)
+      if (parsed.usage) {
+        const inputTokens = parsed.usage.input_tokens ?? 0
+        const outputTokens = parsed.usage.output_tokens ?? 0
+        const model = bodyObj?.model ?? 'unknown'
+        const costCents = calculateCostCents(model, inputTokens, outputTokens)
+        recordUsage({
+          sandboxId: sandbox.id,
+          userId: sandbox.user_id,
+          provider: 'anthropic',
+          model,
+          inputTokens,
+          outputTokens,
+          costCents,
+        }).catch(() => {}) // fire-and-forget
+      }
+    } catch {} // non-JSON response (e.g., streaming) — skip billing for now
+
+    return new Response(responseBody, {
       status: upstream.status,
       headers: {
         'Content-Type': upstream.headers.get('Content-Type') ?? 'application/json',

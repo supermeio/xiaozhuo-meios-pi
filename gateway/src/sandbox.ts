@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto'
 import { Daytona, Image } from '@daytonaio/sdk'
 import { getSandboxByUserId, updateSignedUrl, upsertSandbox, type Sandbox } from './db.js'
+import { ensureUserPlan } from './billing.js'
 import { config } from './config.js'
 import { log } from './log.js'
 
@@ -146,6 +147,9 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     token_expires_at: new Date(Date.now() + TOKEN_TTL).toISOString(),
     status: 'active',
   })
+
+  // Assign free plan if user doesn't have one yet
+  await ensureUserPlan(userId)
 
   slog(`sandbox provisioned for user ${userId}: ${sb.id}`)
   return { sandbox, signedUrl }

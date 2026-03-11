@@ -1,83 +1,3 @@
--- meios auth gateway — Supabase schema
--- Run this in the Supabase SQL Editor after creating your project.
-
--- Sandboxes: maps users to their Daytona sandbox
-CREATE TABLE sandboxes (
-  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id         uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  daytona_id      text NOT NULL,
-  signed_url      text,
-  signed_url_exp  timestamptz,
-  port            integer DEFAULT 18800,
-  status          text DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'error')),
-  created_at      timestamptz DEFAULT now(),
-  token           text,
-  token_expires_at timestamptz,
-  updated_at      timestamptz DEFAULT now()
-);
-
--- One active sandbox per user
-CREATE UNIQUE INDEX idx_sandboxes_user ON sandboxes(user_id) WHERE status = 'active';
-
--- Row Level Security: users can only see their own sandbox
-ALTER TABLE sandboxes ENABLE ROW LEVEL SECURITY;
-
--- The auth gateway uses the service_role key, so RLS doesn't apply to it.
--- But if we ever query from the client side, this protects the data.
-CREATE POLICY "Users can view own sandbox"
-  ON sandboxes FOR SELECT
-  USING (auth.uid() = user_id);
-
--- Rate limiting table for Edge Function (stateless, needs DB-backed counters)
-CREATE TABLE IF NOT EXISTS rate_limits (
-  sandbox_id    uuid PRIMARY KEY REFERENCES sandboxes(id) ON DELETE CASCADE,
-  minute_count  integer NOT NULL DEFAULT 0,
-  minute_start  timestamptz NOT NULL DEFAULT now(),
-  daily_count   integer NOT NULL DEFAULT 0,
-  daily_start   timestamptz NOT NULL DEFAULT now()
-);
-
--- Atomic rate limit check: increments counters and returns whether request is allowed
-CREATE OR REPLACE FUNCTION check_rate_limit(
-  p_sandbox_id uuid,
-  p_minute_limit integer DEFAULT 60,
-  p_daily_limit integer DEFAULT 1000
-) RETURNS jsonb
-LANGUAGE plpgsql AS $$
-DECLARE
-  v_now timestamptz := now();
-  v_minute_count integer;
-  v_daily_count integer;
-BEGIN
-  INSERT INTO rate_limits (sandbox_id, minute_count, minute_start, daily_count, daily_start)
-  VALUES (p_sandbox_id, 1, date_trunc('minute', v_now), 1, date_trunc('day', v_now))
-  ON CONFLICT (sandbox_id) DO UPDATE SET
-    minute_count = CASE
-      WHEN date_trunc('minute', v_now) > rate_limits.minute_start THEN 1
-      ELSE rate_limits.minute_count + 1
-    END,
-    minute_start = CASE
-      WHEN date_trunc('minute', v_now) > rate_limits.minute_start THEN date_trunc('minute', v_now)
-      ELSE rate_limits.minute_start
-    END,
-    daily_count = CASE
-      WHEN date_trunc('day', v_now) > rate_limits.daily_start THEN 1
-      ELSE rate_limits.daily_count + 1
-    END,
-    daily_start = CASE
-      WHEN date_trunc('day', v_now) > rate_limits.daily_start THEN date_trunc('day', v_now)
-      ELSE rate_limits.daily_start
-    END
-  RETURNING minute_count, daily_count INTO v_minute_count, v_daily_count;
-
-  RETURN jsonb_build_object(
-    'allowed', v_minute_count <= p_minute_limit AND v_daily_count <= p_daily_limit,
-    'minute_count', v_minute_count,
-    'daily_count', v_daily_count
-  );
-END;
-$$;
-
 -- Billing plans
 CREATE TABLE IF NOT EXISTS plans (
   id            text PRIMARY KEY,
@@ -147,6 +67,7 @@ DECLARE
   v_used numeric(10,4);
   v_period text := to_char(now(), 'YYYY-MM');
 BEGIN
+  -- Get user's plan budget for current period
   SELECT p.budget_cents INTO v_budget
   FROM user_plans up
   JOIN plans p ON p.id = up.plan_id
@@ -156,10 +77,12 @@ BEGIN
   ORDER BY up.period_start DESC
   LIMIT 1;
 
+  -- No plan = no budget
   IF v_budget IS NULL THEN
     RETURN jsonb_build_object('allowed', false, 'budget_cents', 0, 'used_cents', 0, 'reason', 'no_plan');
   END IF;
 
+  -- Get current month usage
   SELECT COALESCE(total_cost_cents, 0) INTO v_used
   FROM usage_monthly
   WHERE user_id = p_user_id AND period = v_period;
@@ -201,16 +124,3 @@ BEGIN
     updated_at = now();
 END;
 $$;
-
--- Future: tenants table
--- CREATE TABLE tenants (
---   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
---   name       text NOT NULL,
---   created_at timestamptz DEFAULT now()
--- );
--- CREATE TABLE tenant_members (
---   tenant_id uuid REFERENCES tenants(id) ON DELETE CASCADE,
---   user_id   uuid REFERENCES auth.users(id) ON DELETE CASCADE,
---   role      text DEFAULT 'member',
---   PRIMARY KEY (tenant_id, user_id)
--- );

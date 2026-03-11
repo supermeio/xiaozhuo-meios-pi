@@ -16,9 +16,22 @@ const MAX_BODY_SIZE = 524288 // 512 KB
 const ALLOWED_MODELS = [
   "claude-haiku-4-5-20251001",
   "claude-haiku-4-5",
-  "claude-sonnet-4-5-20250514",
-  "claude-sonnet-4-5",
+  "claude-opus-4-6",
 ]
+
+const MODEL_PRICING: Record<string, { inputPer1M: number; outputPer1M: number }> = {
+  'gemini-3.1-flash-lite': { inputPer1M: 25, outputPer1M: 150 },
+  'kimi-k2.5': { inputPer1M: 60, outputPer1M: 300 },
+  'claude-haiku-4-5-20251001': { inputPer1M: 80, outputPer1M: 400 },
+  'claude-haiku-4-5': { inputPer1M: 80, outputPer1M: 400 },
+  'claude-opus-4-6': { inputPer1M: 1500, outputPer1M: 7500 },
+}
+
+function calculateCostCents(model: string, inputTokens: number, outputTokens: number): number {
+  const pricing = MODEL_PRICING[model]
+  if (!pricing) return 0
+  return (inputTokens * pricing.inputPer1M + outputTokens * pricing.outputPer1M) / 1_000_000
+}
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -66,7 +79,7 @@ Deno.serve(async (req) => {
 
   const { data: sandbox, error: dbError } = await supabase
     .from("sandboxes")
-    .select("id")
+    .select("id, user_id")
     .eq("token", hashedToken)
     .eq("status", "active")
     .or(
@@ -78,6 +91,15 @@ Deno.serve(async (req) => {
     return Response.json(
       { ok: false, error: "Invalid sandbox token" },
       { status: 401, headers: CORS_HEADERS },
+    )
+  }
+
+  // Budget check
+  const { data: budget } = await supabase.rpc("check_budget", { p_user_id: sandbox.user_id })
+  if (budget && !budget.allowed) {
+    return Response.json(
+      { ok: false, error: "Monthly budget exceeded", used: budget.used_cents, budget: budget.budget_cents },
+      { status: 402, headers: CORS_HEADERS },
     )
   }
 
@@ -167,12 +189,32 @@ Deno.serve(async (req) => {
       body: body || undefined,
     })
 
-    // Stream the response back
-    return new Response(upstream.body, {
+    const responseBody = await upstream.text()
+
+    // Extract usage for billing (fire-and-forget)
+    try {
+      const parsed = JSON.parse(responseBody)
+      if (parsed.usage) {
+        const inputTokens = parsed.usage.input_tokens ?? 0
+        const outputTokens = parsed.usage.output_tokens ?? 0
+        const model = bodyObj?.model ?? "unknown"
+        const costCents = calculateCostCents(model, inputTokens, outputTokens)
+        supabase.rpc("record_usage", {
+          p_sandbox_id: sandbox.id,
+          p_user_id: sandbox.user_id,
+          p_provider: "anthropic",
+          p_model: model,
+          p_input_tokens: inputTokens,
+          p_output_tokens: outputTokens,
+          p_cost_cents: costCents,
+        }).then(() => {}).catch(() => {}) // fire-and-forget
+      }
+    } catch {} // non-JSON response — skip billing
+
+    return new Response(responseBody, {
       status: upstream.status,
       headers: {
-        "Content-Type":
-          upstream.headers.get("Content-Type") ?? "application/json",
+        "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
         ...CORS_HEADERS,
       },
     })

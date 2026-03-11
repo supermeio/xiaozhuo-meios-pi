@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { createHash } from 'node:crypto'
 import { config } from './config.js'
 
 // ── Types ──
@@ -12,6 +13,7 @@ export interface Sandbox {
   port: number
   token: string | null
   status: 'active' | 'suspended' | 'error'
+  token_expires_at: string | null
   created_at: string
   updated_at: string
 }
@@ -57,13 +59,14 @@ export async function upsertSandbox(sandbox: Partial<Sandbox> & { user_id: strin
   return data as Sandbox
 }
 
-// TODO: hash tokens with SHA-256 before storing/querying. Store hash in DB, compare hash(input) == stored_hash. Add token expiry column.
 export async function getSandboxByToken(token: string): Promise<Sandbox | null> {
+  const hashedToken = createHash('sha256').update(token).digest('hex')
   const { data, error } = await getSupabase()
     .from('sandboxes')
     .select('*')
-    .eq('token', token)
+    .eq('token', hashedToken)
     .eq('status', 'active')
+    .or(`token_expires_at.gt.${new Date().toISOString()},token_expires_at.is.null`)
     .single()
 
   if (error || !data) return null

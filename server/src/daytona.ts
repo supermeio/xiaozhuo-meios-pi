@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// ⚠️  POC ONLY — Do NOT use in production.
+// This script injects the real ANTHROPIC_API_KEY into sandboxes.
+// Production flow uses gateway/src/sandbox.ts which injects a per-sandbox
+// token (sbx_...) and routes through the LLM proxy instead.
 /**
  * Daytona deployment POC — create a sandbox, deploy meios, verify it works.
  *
@@ -81,6 +85,10 @@ async function createSandbox() {
     labels: LABEL,
     autoStopInterval: 0,  // disable auto-stop for POC
     autoArchiveInterval: 10080,  // 7 days
+    // NOTE: This POC injects the key directly. In production, the gateway's
+    // provisionSandbox() uses a per-sandbox sbx_ token + LLM proxy instead.
+    // To test with the proxy, set ANTHROPIC_BASE_URL to your Edge Function URL
+    // and use a sandbox token as ANTHROPIC_API_KEY.
     envVars: {
       ANTHROPIC_API_KEY: anthropicKey,
     },

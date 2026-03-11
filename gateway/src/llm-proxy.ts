@@ -5,6 +5,7 @@ import { logError } from './log.js'
 
 const ANTHROPIC_API = 'https://api.anthropic.com'
 const MAX_BODY_SIZE = 524288 // 512 KB
+const ALLOWED_MODELS = ['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'claude-sonnet-4-5-20250514', 'claude-sonnet-4-5']
 
 // ── In-memory per-sandbox rate limiter ──
 
@@ -56,8 +57,11 @@ export async function llmProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: 'Request body too large' }, 413)
   }
 
-  // Build target URL: same path on Anthropic API
+  // Path allowlist: only specific Anthropic API paths
   const path = c.req.path
+  if (!/^\/v1\/messages(\/count_tokens|\/batches(\/.*)?)?$/.test(path)) {
+    return c.json({ ok: false, error: 'Path not allowed' }, 403)
+  }
   const targetUrl = ANTHROPIC_API + path
 
   // Forward request to Anthropic with the real API key
@@ -82,6 +86,13 @@ export async function llmProxy(c: Context): Promise<Response> {
     // Check body size when Content-Length was not provided
     if (!contentLength && body.length > MAX_BODY_SIZE) {
       return c.json({ ok: false, error: 'Request body too large' }, 413)
+    }
+
+    // Model allowlist
+    let bodyObj: any = null
+    try { bodyObj = JSON.parse(body) } catch {}
+    if (bodyObj?.model && !ALLOWED_MODELS.includes(bodyObj.model)) {
+      return c.json({ ok: false, error: `Model not allowed: ${bodyObj.model}` }, 403)
     }
 
     const upstream = await fetch(targetUrl, {

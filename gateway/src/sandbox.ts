@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, createHash } from 'node:crypto'
 import { Daytona, Image } from '@daytonaio/sdk'
 import { getSandboxByUserId, updateSignedUrl, upsertSandbox, type Sandbox } from './db.js'
 import { config } from './config.js'
@@ -69,9 +69,9 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 
   slog(`provisioning sandbox for user ${userId}...`)
 
-  // Generate a per-sandbox token for LLM proxy auth
-  // TODO: hash tokens with SHA-256 before storing/querying. Store hash in DB, compare hash(input) == stored_hash. Add token expiry column.
+  // Generate a per-sandbox token for LLM proxy auth (hash before storing)
   const sandboxToken = `sbx_${randomBytes(32).toString('hex')}`
+  const hashedToken = createHash('sha256').update(sandboxToken).digest('hex')
 
   // 1. Create sandbox — real API key never enters the sandbox
   const sb = await daytona.create({
@@ -140,7 +140,8 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     signed_url: signedUrl,
     signed_url_exp: expiresAt,
     port,
-    token: sandboxToken,
+    token: hashedToken,
+    token_expires_at: new Date(Date.now() + 30 * 86400_000).toISOString(),
     status: 'active',
   })
 

@@ -111,16 +111,8 @@ async function main() {
     ;(model as any).baseUrl = process.env.GEMINI_BASE_URL
   }
 
-  // Strip sensitive env vars now that SDK has read them
-  delete process.env.ANTHROPIC_API_KEY
-  delete process.env.ANTHROPIC_BASE_URL
-  delete process.env.GEMINI_API_KEY
-  delete process.env.GOOGLE_API_KEY
-  delete process.env.GEMINI_BASE_URL
-  delete process.env.OPENAI_API_KEY
-  delete process.env.OPENAI_BASE_URL
-  delete process.env.KIMI_API_KEY
-  delete process.env.KIMI_BASE_URL
+  // Note: env vars kept — pi-ai reads keys lazily at prompt() time.
+  // In sandbox, these are proxy tokens, not real API keys.
 
   console.log(`   model: ${model.name} (${model.id})`)
   console.log('')

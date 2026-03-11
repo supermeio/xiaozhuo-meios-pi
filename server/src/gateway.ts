@@ -107,16 +107,9 @@ if (process.env.GEMINI_BASE_URL) {
   ;(model as any).baseUrl = process.env.GEMINI_BASE_URL
 }
 
-// SEC-001: Strip sensitive env vars after SDK has read them
-delete process.env.ANTHROPIC_API_KEY
-delete process.env.ANTHROPIC_BASE_URL
-delete process.env.GEMINI_API_KEY
-delete process.env.GOOGLE_API_KEY
-delete process.env.GEMINI_BASE_URL
-delete process.env.OPENAI_API_KEY
-delete process.env.OPENAI_BASE_URL
-delete process.env.KIMI_API_KEY
-delete process.env.KIMI_BASE_URL
+// Note: env vars are NOT stripped here. pi-ai SDK reads API keys
+// lazily at prompt() time, not at getModel() time. In the sandbox,
+// these are proxy tokens (not real API keys), so no security risk.
 
 // ── Init cron & heartbeat ───────────────────────────────────
 initCron(WORKSPACE)

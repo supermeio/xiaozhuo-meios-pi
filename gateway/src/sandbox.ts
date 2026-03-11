@@ -4,8 +4,10 @@ import { getSandboxByUserId, updateSignedUrl, upsertSandbox, type Sandbox } from
 import { config } from './config.js'
 import { log } from './log.js'
 
-const SIGNED_URL_TTL = 86400 // 24 hours
-const REFRESH_BUFFER = 3600  // refresh 1 hour before expiry
+const SIGNED_URL_TTL = 86400    // 24 hours
+const REFRESH_BUFFER = 3600     // refresh 1 hour before expiry
+const TOKEN_TTL = 7 * 86400_000 // 7 days
+const TOKEN_ROTATE_BUFFER = 86400_000 // rotate 1 day before expiry
 
 let _daytona: Daytona | null = null
 
@@ -141,7 +143,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     signed_url_exp: expiresAt,
     port,
     token: hashedToken,
-    token_expires_at: new Date(Date.now() + 30 * 86400_000).toISOString(),
+    token_expires_at: new Date(Date.now() + TOKEN_TTL).toISOString(),
     status: 'active',
   })
 
@@ -156,4 +158,52 @@ export async function forceRefreshSignedUrl(userId: string): Promise<string | nu
   const sandbox = await getSandboxByUserId(userId)
   if (!sandbox) return null
   return await refreshSignedUrl(sandbox)
+}
+
+/**
+ * Rotate the sandbox token if it's within 1 day of expiry.
+ * Called on each proxied request (JWT-authenticated), so only legitimate
+ * users trigger rotation. Runs in background — does not block the request.
+ */
+export function rotateTokenIfNeeded(sandbox: Sandbox): void {
+  if (!sandbox.token_expires_at) return
+  const expiresAt = new Date(sandbox.token_expires_at).getTime()
+  if (Date.now() < expiresAt - TOKEN_ROTATE_BUFFER) return
+
+  // Fire-and-forget: rotate in background
+  rotateToken(sandbox).catch(err =>
+    slog('token rotation failed', { sandboxId: sandbox.id, error: (err as Error).message })
+  )
+}
+
+async function rotateToken(sandbox: Sandbox): Promise<void> {
+  const newToken = `sbx_${randomBytes(32).toString('hex')}`
+  const newHash = createHash('sha256').update(newToken).digest('hex')
+  const newExpiry = new Date(Date.now() + TOKEN_TTL).toISOString()
+
+  // 1. Update DB with new hashed token
+  await upsertSandbox({
+    user_id: sandbox.user_id,
+    token: newHash,
+    token_expires_at: newExpiry,
+  })
+
+  // 2. Update sandbox: write new token and restart gateway so it picks up the change
+  const daytona = getDaytona()
+  const sb = await daytona.get(sandbox.daytona_id)
+
+  // Write token to env file that the gateway reads on startup
+  await sb.process.executeCommand(
+    `echo 'ANTHROPIC_API_KEY=${newToken}' > /home/daytona/meios/.env.token`,
+  )
+
+  // Restart the gateway session with new env
+  try { await sb.process.deleteSession('gateway') } catch {}
+  await sb.process.createSession('gateway')
+  await sb.process.executeSessionCommand('gateway', {
+    command: 'cd /home/daytona/meios/server && export $(cat /home/daytona/meios/.env.token) && node --import tsx src/gateway.ts 2>&1',
+    runAsync: true,
+  })
+
+  slog('token rotated', { sandboxId: sandbox.id, expiresAt: newExpiry })
 }

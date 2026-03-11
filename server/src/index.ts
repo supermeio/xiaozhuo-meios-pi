@@ -66,13 +66,20 @@ async function main() {
   console.log(`   workspace: ${WORKSPACE}`)
 
   // Load .env file (persisted by provisioning / token rotation)
-  const envFilePath = resolve(PROJECT_ROOT, '.env.token')
-  if (existsSync(envFilePath)) {
-    for (const line of readFileSync(envFilePath, 'utf-8').split('\n')) {
-      const match = line.match(/^([A-Z_]+)=(.+)$/)
-      if (match && !process.env[match[1]]) {
-        process.env[match[1]] = match[2]
+  const envSearchPaths = [
+    resolve(PROJECT_ROOT, '.env.token'),
+    resolve(import.meta.dirname, '..', '.env.token'),
+    resolve(import.meta.dirname, '..', '..', '.env.token'),
+  ]
+  for (const envPath of envSearchPaths) {
+    if (existsSync(envPath)) {
+      for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
+        const match = line.match(/^([A-Z_]+)=(.+)$/)
+        if (match && !process.env[match[1]]) {
+          process.env[match[1]] = match[2]
+        }
       }
+      break
     }
   }
 

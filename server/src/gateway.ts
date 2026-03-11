@@ -55,13 +55,21 @@ mkdirSync(SESSIONS_DIR, { recursive: true })
 setWorkspaceRoot(WORKSPACE)
 
 // ── Load .env file (persisted by provisioning / token rotation) ──
-const envFilePath = resolve(PROJECT_ROOT, '.env.token')
-if (existsSync(envFilePath)) {
-  for (const line of readFileSync(envFilePath, 'utf-8').split('\n')) {
-    const match = line.match(/^([A-Z_]+)=(.+)$/)
-    if (match && !process.env[match[1]]) {
-      process.env[match[1]] = match[2]
+// Search multiple locations since PROJECT_ROOT may vary depending on tsx runtime
+const envSearchPaths = [
+  resolve(PROJECT_ROOT, '.env.token'),
+  resolve(import.meta.dirname, '..', '.env.token'),  // server/.env.token (if dirname = server/src)
+  resolve(import.meta.dirname, '..', '..', '.env.token'),  // project root
+]
+for (const envPath of envSearchPaths) {
+  if (existsSync(envPath)) {
+    for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
+      const match = line.match(/^([A-Z_]+)=(.+)$/)
+      if (match && !process.env[match[1]]) {
+        process.env[match[1]] = match[2]
+      }
     }
+    break
   }
 }
 

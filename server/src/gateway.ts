@@ -114,7 +114,7 @@ const model = {
   id: 'kimi-k2.5',
   name: 'Kimi K2.5',
   api: 'openai-completions',
-  provider: 'litellm',
+  provider: 'openai',
   baseUrl: process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
   reasoning: true,
   input: ['text'] as string[],

@@ -103,14 +103,24 @@ if (proxyBase) {
 }
 
 // ── Model ───────────────────────────────────────────────────
-// All LLM calls go through LiteLLM via OpenAI-compatible format.
+// All LLM calls go through LiteLLM via OpenAI-compatible /chat/completions.
 // LiteLLM routes to the actual provider based on model name.
-// The OPENAI_BASE_URL points to: Edge Function → LiteLLM → provider.
 // See docs/model-selection.md for why kimi-k2.5 was chosen.
-const model = getModel('openai', 'kimi-k2.5')
-
-if (process.env.OPENAI_BASE_URL) {
-  ;(model as any).baseUrl = process.env.OPENAI_BASE_URL
+//
+// pi-ai's getModel() only knows built-in models, so we construct the model
+// object manually. The "openai-completions" api type maps to /chat/completions
+// which is what LiteLLM expects.
+const model = {
+  id: 'kimi-k2.5',
+  name: 'Kimi K2.5',
+  api: 'openai-completions',
+  provider: 'litellm',
+  baseUrl: process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+  reasoning: true,
+  input: ['text'] as string[],
+  cost: { input: 0.6, output: 3.0, cacheRead: 0.1, cacheWrite: 0 },
+  contextWindow: 131072,
+  maxTokens: 8192,
 }
 
 // ── Init cron & heartbeat ───────────────────────────────────

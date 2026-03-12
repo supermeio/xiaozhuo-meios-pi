@@ -1,8 +1,7 @@
 import type { Context } from 'hono'
 import type { AuthUser } from './auth.js'
 import type { Sandbox } from './db.js'
-import { resolveSignedUrl, forceRefreshSignedUrl, provisionSandbox, rotateTokenIfNeeded } from './sandbox.js'
-import { getSandboxByUserId } from './db.js'
+import { resolveSignedUrl, forceRefreshSignedUrl, provisionSandbox } from './sandbox.js'
 import { logError } from './log.js'
 
 // In-flight provision locks: prevents duplicate sandbox creation when
@@ -47,10 +46,6 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
       )
     }
   }
-
-  // Check if sandbox token needs rotation (fire-and-forget, doesn't block)
-  const sandbox = await getSandboxByUserId(user.id)
-  if (sandbox) rotateTokenIfNeeded(sandbox)
 
   // Build target URL: signed base + original path
   const path = c.req.path

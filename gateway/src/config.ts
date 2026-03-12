@@ -16,12 +16,13 @@ export const config = {
     apiKey: required('DAYTONA_API_KEY'),
     apiUrl: process.env.DAYTONA_API_URL ?? 'https://app.daytona.io',
   },
+  litellm: {
+    proxyUrl: process.env.LITELLM_PROXY_URL
+      ?? 'https://litellm-proxy-932630247740.us-central1.run.app',
+    masterKey: required('LITELLM_MASTER_KEY'),
+  },
   meios: {
     repoUrl: process.env.MEIOS_REPO_URL ?? 'https://github.com/supermeio/xiaozhuo-meios-pi.git',
-    anthropicKey: required('ANTHROPIC_API_KEY'),
-    geminiKey: process.env.GOOGLE_API_KEY ?? '',
-    openaiKey: process.env.OPENAI_API_KEY ?? '',
-    kimiKey: process.env.KIMI_API_KEY ?? '',
     // LLM proxy URL for sandboxes (Supabase Edge Function — whitelisted by Daytona)
     llmProxyUrl: process.env.MEIOS_LLM_PROXY_URL
       ?? `${required('SUPABASE_URL')}/functions/v1/llm-proxy`,

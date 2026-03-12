@@ -22,12 +22,15 @@ app.get('/ping', (c) => {
   return c.json({ ok: true, data: { version: '0.1.0' } })
 })
 
-// ── LLM proxy (sandbox token auth, not JWT) ──
+// ── LLM proxy (LiteLLM virtual key auth, not JWT) ──
+// All routes relay to LiteLLM which handles auth, rate limiting, budget, routing.
 
 app.post('/v1/messages', llmProxy)
 app.post('/v1/messages/*', llmProxy)
-app.post('/google/*', llmProxy)
+app.post('/chat/completions', llmProxy)
+app.post('/v1/chat/completions', llmProxy)
 app.post('/openai/*', llmProxy)
+app.post('/google/*', llmProxy)
 app.post('/moonshot/*', llmProxy)
 
 // ── Authenticated routes (proxy to sandbox) ──

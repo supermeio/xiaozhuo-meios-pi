@@ -1,5 +1,4 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import { createHash } from 'node:crypto'
 import { config } from './config.js'
 
 // ── Types ──
@@ -56,20 +55,6 @@ export async function upsertSandbox(sandbox: Partial<Sandbox> & { user_id: strin
     .single()
 
   if (error) throw new Error(`Failed to upsert sandbox: ${error.message}`)
-  return data as Sandbox
-}
-
-export async function getSandboxByToken(token: string): Promise<Sandbox | null> {
-  const hashedToken = createHash('sha256').update(token).digest('hex')
-  const { data, error } = await getSupabase()
-    .from('sandboxes')
-    .select('*')
-    .eq('token', hashedToken)
-    .eq('status', 'active')
-    .or(`token_expires_at.gt.${new Date().toISOString()},token_expires_at.is.null`)
-    .single()
-
-  if (error || !data) return null
   return data as Sandbox
 }
 

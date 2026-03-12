@@ -1,14 +1,11 @@
-import { randomBytes, createHash } from 'node:crypto'
 import { Daytona, Image } from '@daytonaio/sdk'
 import { getSandboxByUserId, updateSignedUrl, upsertSandbox, type Sandbox } from './db.js'
 import { ensureUserPlan } from './billing.js'
 import { config } from './config.js'
-import { log } from './log.js'
+import { log, logError } from './log.js'
 
 const SIGNED_URL_TTL = 86400    // 24 hours
 const REFRESH_BUFFER = 3600     // refresh 1 hour before expiry
-const TOKEN_TTL = 7 * 86400_000 // 7 days
-const TOKEN_ROTATE_BUFFER = 86400_000 // rotate 1 day before expiry
 
 let _daytona: Daytona | null = null
 
@@ -20,6 +17,60 @@ function getDaytona(): Daytona {
 }
 
 function slog(msg: string, data?: Record<string, unknown>) { log('sandbox', msg, data) }
+
+// ── LiteLLM virtual key management ──
+
+/**
+ * Create a LiteLLM virtual key for a sandbox.
+ * The key has per-key rate limiting and monthly budget.
+ */
+async function createLiteLLMKey(userId: string): Promise<{ key: string; keyName: string }> {
+  const resp = await fetch(`${config.litellm.proxyUrl}/key/generate`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${config.litellm.masterKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      // Rate limit: 60 requests per minute
+      rpm_limit: 60,
+      // Monthly budget: $5 for free tier (500 cents)
+      max_budget: 5,
+      budget_duration: '30d',
+      // Allow all configured models
+      models: [],  // empty = allow all models in config
+      metadata: { user_id: userId, app: 'meios' },
+    }),
+  })
+
+  if (!resp.ok) {
+    const body = await resp.text()
+    throw new Error(`LiteLLM key/generate failed (${resp.status}): ${body}`)
+  }
+
+  const data = await resp.json()
+  return { key: data.key, keyName: data.key_name ?? data.key }
+}
+
+/**
+ * Delete a LiteLLM virtual key (on sandbox teardown).
+ */
+export async function deleteLiteLLMKey(keyName: string): Promise<void> {
+  try {
+    await fetch(`${config.litellm.proxyUrl}/key/delete`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.litellm.masterKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ keys: [keyName] }),
+    })
+  } catch (err) {
+    logError('sandbox', 'failed to delete LiteLLM key', err as Error, { keyName })
+  }
+}
+
+// ── Signed URL management ──
 
 /**
  * Resolve the signed preview URL for a user's sandbox.
@@ -42,9 +93,6 @@ export async function resolveSignedUrl(userId: string): Promise<string | null> {
   return await refreshSignedUrl(sandbox)
 }
 
-/**
- * Refresh the signed preview URL for a sandbox.
- */
 async function refreshSignedUrl(sandbox: Sandbox): Promise<string> {
   const daytona = getDaytona()
   const sb = await daytona.get(sandbox.daytona_id)
@@ -57,14 +105,17 @@ async function refreshSignedUrl(sandbox: Sandbox): Promise<string> {
   return signedUrl
 }
 
+// ── Sandbox provisioning ──
+
 /**
  * Provision a new Daytona sandbox for a user.
  *
- * 1. Create sandbox with node:20-slim
- * 2. Clone meios repo & install deps
- * 3. Start the gateway process
- * 4. Get signed preview URL
- * 5. Store sandbox record in DB
+ * 1. Create LiteLLM virtual key (rate limit + budget)
+ * 2. Create sandbox with node:20-slim
+ * 3. Clone meios repo & install deps
+ * 4. Start the gateway process
+ * 5. Get signed preview URL
+ * 6. Store sandbox record in DB
  */
 export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandbox; signedUrl: string }> {
   const daytona = getDaytona()
@@ -72,11 +123,13 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 
   slog(`provisioning sandbox for user ${userId}...`)
 
-  // Generate a per-sandbox token for LLM proxy auth (hash before storing)
-  const sandboxToken = `sbx_${randomBytes(32).toString('hex')}`
-  const hashedToken = createHash('sha256').update(sandboxToken).digest('hex')
+  // 1. Create LiteLLM virtual key — handles rate limiting, budget, usage tracking
+  const { key: virtualKey, keyName } = await createLiteLLMKey(userId)
+  slog('LiteLLM virtual key created', { keyName })
 
-  // 1. Create sandbox — real API key never enters the sandbox
+  // 2. Create sandbox — no real API keys enter the sandbox
+  //    All LLM calls go: sandbox → Edge Function → LiteLLM → provider
+  const proxyUrl = config.meios.llmProxyUrl
   const sb = await daytona.create({
     image: Image.base('node:20-slim'),
     language: 'typescript',
@@ -85,19 +138,20 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     autoStopInterval: 0,
     autoArchiveInterval: 10080, // 7 days
     envVars: {
-      // Anthropic — SDK reads ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY
-      ANTHROPIC_BASE_URL: config.meios.llmProxyUrl,
-      ANTHROPIC_API_KEY: sandboxToken,
-      // Google — pi-ai SDK reads GEMINI_API_KEY; server code reads GOOGLE_API_KEY
-      GEMINI_BASE_URL: config.meios.llmProxyUrl + '/google/v1beta',
-      GEMINI_API_KEY: sandboxToken,
-      GOOGLE_API_KEY: sandboxToken,
-      // OpenAI — SDK reads OPENAI_API_KEY; pi-ai default baseUrl includes /v1
-      OPENAI_BASE_URL: config.meios.llmProxyUrl + '/openai/v1',
-      OPENAI_API_KEY: sandboxToken,
-      // Moonshot/Kimi — uses Anthropic-compatible API
-      KIMI_BASE_URL: config.meios.llmProxyUrl + '/moonshot',
-      KIMI_API_KEY: sandboxToken,
+      // All providers use OpenAI-compatible format via LiteLLM.
+      // The sandbox sends requests to the Edge Function, which relays to LiteLLM.
+      // LiteLLM routes to the correct provider based on model name.
+      OPENAI_BASE_URL: proxyUrl + '/v1',
+      OPENAI_API_KEY: virtualKey,
+      // Keep Anthropic env for backwards compat (pi-ai may read these)
+      ANTHROPIC_BASE_URL: proxyUrl,
+      ANTHROPIC_API_KEY: virtualKey,
+      // All providers share the same proxy token
+      GEMINI_BASE_URL: proxyUrl + '/google/v1beta',
+      GEMINI_API_KEY: virtualKey,
+      GOOGLE_API_KEY: virtualKey,
+      KIMI_BASE_URL: proxyUrl + '/moonshot',
+      KIMI_API_KEY: virtualKey,
     },
   }, {
     timeout: 120,
@@ -105,7 +159,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 
   slog(`sandbox created: ${sb.id}`)
 
-  // 2. Clone repo & install
+  // 3. Clone repo & install
   slog('cloning meios repo and installing deps...')
   const setupCmd = [
     'apt-get update -qq && apt-get install -y -qq git > /dev/null 2>&1',
@@ -120,26 +174,24 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
   }
   slog('deps installed')
 
-  // 2b. Write persistent .env.token — server reads this on startup
-  //     so it works even if Daytona loses env vars after restarts
-  const proxyUrl = config.meios.llmProxyUrl
+  // 3b. Write persistent .env.token — server reads this on startup
   const envTokenLines = [
+    `OPENAI_BASE_URL=${proxyUrl}/v1`,
+    `OPENAI_API_KEY=${virtualKey}`,
     `ANTHROPIC_BASE_URL=${proxyUrl}`,
-    `ANTHROPIC_API_KEY=${sandboxToken}`,
+    `ANTHROPIC_API_KEY=${virtualKey}`,
     `GEMINI_BASE_URL=${proxyUrl}/google/v1beta`,
-    `GEMINI_API_KEY=${sandboxToken}`,
-    `GOOGLE_API_KEY=${sandboxToken}`,
-    `OPENAI_BASE_URL=${proxyUrl}/openai/v1`,
-    `OPENAI_API_KEY=${sandboxToken}`,
+    `GEMINI_API_KEY=${virtualKey}`,
+    `GOOGLE_API_KEY=${virtualKey}`,
     `KIMI_BASE_URL=${proxyUrl}/moonshot`,
-    `KIMI_API_KEY=${sandboxToken}`,
+    `KIMI_API_KEY=${virtualKey}`,
   ].join('\n')
   await sb.process.executeCommand(
     `cat > /home/daytona/meios/.env.token << 'EOF'\n${envTokenLines}\nEOF`,
   )
   slog('.env.token written')
 
-  // 3. Start gateway in background session
+  // 4. Start gateway in background session
   slog('starting gateway...')
   await sb.process.createSession('gateway')
   await sb.process.executeSessionCommand('gateway', {
@@ -161,20 +213,20 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     }
   }
 
-  // 4. Get signed URL
+  // 5. Get signed URL
   const result = await sb.getSignedPreviewUrl(port, SIGNED_URL_TTL)
   const signedUrl = typeof result === 'string' ? result : result.url
   const expiresAt = new Date(Date.now() + SIGNED_URL_TTL * 1000).toISOString()
 
-  // 5. Store in DB (including sandbox token for LLM proxy auth)
+  // 6. Store in DB (keyName stored for LiteLLM key management)
   const sandbox = await upsertSandbox({
     user_id: userId,
     daytona_id: sb.id,
     signed_url: signedUrl,
     signed_url_exp: expiresAt,
     port,
-    token: hashedToken,
-    token_expires_at: new Date(Date.now() + TOKEN_TTL).toISOString(),
+    token: keyName,          // LiteLLM key name (for revocation)
+    token_expires_at: null,  // LiteLLM manages key lifecycle
     status: 'active',
   })
 
@@ -192,52 +244,4 @@ export async function forceRefreshSignedUrl(userId: string): Promise<string | nu
   const sandbox = await getSandboxByUserId(userId)
   if (!sandbox) return null
   return await refreshSignedUrl(sandbox)
-}
-
-/**
- * Rotate the sandbox token if it's within 1 day of expiry.
- * Called on each proxied request (JWT-authenticated), so only legitimate
- * users trigger rotation. Runs in background — does not block the request.
- */
-export function rotateTokenIfNeeded(sandbox: Sandbox): void {
-  if (!sandbox.token_expires_at) return
-  const expiresAt = new Date(sandbox.token_expires_at).getTime()
-  if (Date.now() < expiresAt - TOKEN_ROTATE_BUFFER) return
-
-  // Fire-and-forget: rotate in background
-  rotateToken(sandbox).catch(err =>
-    slog('token rotation failed', { sandboxId: sandbox.id, error: (err as Error).message })
-  )
-}
-
-async function rotateToken(sandbox: Sandbox): Promise<void> {
-  const newToken = `sbx_${randomBytes(32).toString('hex')}`
-  const newHash = createHash('sha256').update(newToken).digest('hex')
-  const newExpiry = new Date(Date.now() + TOKEN_TTL).toISOString()
-
-  // 1. Update DB with new hashed token
-  await upsertSandbox({
-    user_id: sandbox.user_id,
-    token: newHash,
-    token_expires_at: newExpiry,
-  })
-
-  // 2. Update sandbox: write new token and restart gateway so it picks up the change
-  const daytona = getDaytona()
-  const sb = await daytona.get(sandbox.daytona_id)
-
-  // Write token to env file that the gateway reads on startup
-  await sb.process.executeCommand(
-    `cat > /home/daytona/meios/.env.token << 'EOF'\nANTHROPIC_BASE_URL=${config.meios.llmProxyUrl}\nANTHROPIC_API_KEY=${newToken}\nGEMINI_BASE_URL=${config.meios.llmProxyUrl}/google\nGEMINI_API_KEY=${newToken}\nGOOGLE_API_KEY=${newToken}\nOPENAI_BASE_URL=${config.meios.llmProxyUrl}/openai\nOPENAI_API_KEY=${newToken}\nKIMI_BASE_URL=${config.meios.llmProxyUrl}/moonshot\nKIMI_API_KEY=${newToken}\nEOF`,
-  )
-
-  // Restart the gateway session with new env
-  try { await sb.process.deleteSession('gateway') } catch {}
-  await sb.process.createSession('gateway')
-  await sb.process.executeSessionCommand('gateway', {
-    command: 'cd /home/daytona/meios/server && node --import tsx src/gateway.ts 2>&1',
-    runAsync: true,
-  })
-
-  slog('token rotated', { sandboxId: sandbox.id, expiresAt: newExpiry })
 }

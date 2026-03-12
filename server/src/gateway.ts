@@ -103,20 +103,15 @@ if (proxyBase) {
 }
 
 // ── Model ───────────────────────────────────────────────────
-const model = getModel('google', 'gemini-3.1-flash-lite-preview')
+// All LLM calls go through LiteLLM via OpenAI-compatible format.
+// LiteLLM routes to the actual provider based on model name.
+// The OPENAI_BASE_URL points to: Edge Function → LiteLLM → provider.
+// See docs/model-selection.md for why kimi-k2.5 was chosen.
+const model = getModel('openai', 'kimi-k2.5')
 
-// Override base URLs to route through LLM proxy
-if (process.env.ANTHROPIC_BASE_URL) {
-  const anthropicModel = getModel('anthropic', 'claude-haiku-4-5')
-  if (anthropicModel) (anthropicModel as any).baseUrl = process.env.ANTHROPIC_BASE_URL
+if (process.env.OPENAI_BASE_URL) {
+  ;(model as any).baseUrl = process.env.OPENAI_BASE_URL
 }
-if (process.env.GEMINI_BASE_URL) {
-  ;(model as any).baseUrl = process.env.GEMINI_BASE_URL
-}
-
-// Note: env vars are NOT stripped here. pi-ai SDK reads API keys
-// lazily at prompt() time, not at getModel() time. In the sandbox,
-// these are proxy tokens (not real API keys), so no security risk.
 
 // ── Init cron & heartbeat ───────────────────────────────────
 initCron(WORKSPACE)

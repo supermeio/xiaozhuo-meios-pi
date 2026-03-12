@@ -141,7 +141,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
       // All providers use OpenAI-compatible format via LiteLLM.
       // The sandbox sends requests to the Edge Function, which relays to LiteLLM.
       // LiteLLM routes to the correct provider based on model name.
-      OPENAI_BASE_URL: proxyUrl + '/v1',
+      OPENAI_BASE_URL: proxyUrl,
       OPENAI_API_KEY: virtualKey,
       // Keep Anthropic env for backwards compat (pi-ai may read these)
       ANTHROPIC_BASE_URL: proxyUrl,
@@ -176,7 +176,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 
   // 3b. Write persistent .env.token — server reads this on startup
   const envTokenLines = [
-    `OPENAI_BASE_URL=${proxyUrl}/v1`,
+    `OPENAI_BASE_URL=${proxyUrl}`,
     `OPENAI_API_KEY=${virtualKey}`,
     `ANTHROPIC_BASE_URL=${proxyUrl}`,
     `ANTHROPIC_API_KEY=${virtualKey}`,

@@ -69,8 +69,8 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
 
 ### LiteLLM Proxy (`litellm/`)
 - [LiteLLM](https://github.com/BerriAI/litellm) on GCP Cloud Run (us-central1)
-- URL: `https://litellm-proxy-932630247740.us-central1.run.app`
-- Dashboard: `…/ui/` (admin / master key)
+- URL: Cloud Run service URL (see `LITELLM_PROXY_URL` env var)
+- Dashboard: `${LITELLM_PROXY_URL}/ui/` (admin / master key)
 - Config: `litellm/config.yaml`
 - Database: shared Supabase Postgres (`LiteLLM_` prefixed tables)
 - Resources: 1 vCPU, 1 GB RAM, min 0 / max 3

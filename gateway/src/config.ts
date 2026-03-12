@@ -17,8 +17,7 @@ export const config = {
     apiUrl: process.env.DAYTONA_API_URL ?? 'https://app.daytona.io',
   },
   litellm: {
-    proxyUrl: process.env.LITELLM_PROXY_URL
-      ?? 'https://litellm-proxy-932630247740.us-central1.run.app',
+    proxyUrl: required('LITELLM_PROXY_URL'),
     masterKey: required('LITELLM_MASTER_KEY'),
   },
   meios: {

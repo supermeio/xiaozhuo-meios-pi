@@ -17,7 +17,7 @@
  */
 
 const LITELLM_PROXY_URL = Deno.env.get("LITELLM_PROXY_URL")
-  ?? "https://litellm-proxy-932630247740.us-central1.run.app"
+if (!LITELLM_PROXY_URL) throw new Error("LITELLM_PROXY_URL env var is required")
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",

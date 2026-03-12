@@ -1,75 +1,86 @@
 # meios Security
 
-> Updated: 2026-03-11
+> Updated: 2026-03-13
 
 ## API Key Security
 
 ### Design Principle
 
-System keys (platform-provided) must **never enter user sandboxes**. The real
-`ANTHROPIC_API_KEY` exists only in trusted server-side environments (Cloud Run
-env vars, Supabase Edge Function secrets). Sandboxes receive a per-sandbox
-token that has no value outside our platform.
+Real provider API keys (Anthropic, Google, OpenAI, Moonshot) must **never enter user sandboxes**. They exist only in trusted server-side environments:
 
-### System Key Proxy (implemented)
+- **LiteLLM Proxy** (Cloud Run) — holds all real provider keys
+- **Supabase Edge Function secrets** — holds `LITELLM_PROXY_URL` only
 
-Each sandbox gets a unique token (`sbx_...`) at provisioning time. When the
-pi-agent inside the sandbox makes LLM calls, the Anthropic SDK sends the
-sandbox token to our proxy, which validates it and forwards to Anthropic with
-the real key.
+Sandboxes receive a **LiteLLM virtual key** that has no value outside our platform.
 
-**Proxy flow:**
+### LiteLLM Virtual Key System
+
+Each sandbox gets a LiteLLM virtual key (`sk-...`) at provisioning time. The key is scoped with:
+
+| Property | Value |
+|----------|-------|
+| Rate limit | 60 rpm |
+| Budget | $5/month |
+| Budget reset | Every 30 days |
+| Model access | All configured models |
+
+When pi-agent makes LLM calls, the request flows through:
 
 ```
 Sandbox pi-agent
-    → ANTHROPIC_BASE_URL (Supabase Edge Function)
-    → POST /functions/v1/llm-proxy
-      Header: x-api-key: sbx_<sandbox_token>
-    → Edge Function:
-        1. Query sandboxes table: token = sbx_... AND status = active
-        2. If valid → forward to api.anthropic.com with real ANTHROPIC_API_KEY
-        3. Stream response back to sandbox
-    ← Claude response
+    → Edge Function (thin relay, *.supabase.co)
+    → LiteLLM Proxy (Cloud Run)
+        1. Validate virtual key
+        2. Check rate limit (60 rpm)
+        3. Check budget ($5/month)
+        4. Route to provider based on model name
+        5. Forward with real provider API key
+    ← Provider response
 ```
 
-**Components:**
+### Components
 
-| Component | Location | Role |
-|-----------|----------|------|
-| Supabase Edge Function `llm-proxy` | `supabase.co/functions/v1/llm-proxy` | Primary proxy for sandboxes |
-| Cloud Run `POST /v1/messages` | `api.meios.ai/v1/messages` | Backup proxy for non-sandbox clients (iOS, etc.) |
-| `sandboxes.token` column | Supabase Postgres | Per-sandbox auth token |
+| Component | Role |
+|-----------|------|
+| Supabase Edge Function `llm-proxy` | Network relay (Daytona can reach `*.supabase.co` but not `*.run.app`) |
+| LiteLLM Proxy (Cloud Run) | Auth, rate limit, budget, routing, usage tracking |
+| LiteLLM virtual key | Per-sandbox credential, revocable, budget-limited |
 
-**Sandbox env vars (set at provisioning):**
+### Sandbox env vars (set at provisioning)
 
 ```
+OPENAI_BASE_URL=https://<project>.supabase.co/functions/v1/llm-proxy
+OPENAI_API_KEY=sk-<litellm_virtual_key>
 ANTHROPIC_BASE_URL=https://<project>.supabase.co/functions/v1/llm-proxy
-ANTHROPIC_API_KEY=sbx_<random_hex>
+ANTHROPIC_API_KEY=sk-<litellm_virtual_key>
 ```
 
-The pi-ai SDK reads `ANTHROPIC_BASE_URL` to override the default
-`api.anthropic.com` endpoint. A manual `(model as any).baseUrl = process.env.ANTHROPIC_BASE_URL`
-is needed after `getModel()` because the SDK hardcodes the base URL in the
-model object.
+All providers share the same virtual key — LiteLLM validates it once and routes by model name.
+
+### Key Security Properties
+
+- **Real API keys never enter sandboxes** — only LiteLLM virtual keys
+- **Virtual key = sandbox scope** — rate limited, budgeted, revocable
+- **Edge Function has no secrets** — just a network relay, LiteLLM validates everything
+- **No infrastructure URLs in code** — `LITELLM_PROXY_URL` read from env vars only
+- **LiteLLM Dashboard** — audit trail of all requests, spend per key/user/model
 
 ### Why Supabase Edge Function (not Cloud Run)
 
 Daytona sandboxes on Tier 1/2 have **TLS-level egress allowlists** — only
-specific domains can be reached. Our domain `api.meios.ai` is not on the list,
-but `*.supabase.co` is.
+specific domains can be reached.
 
 | Domain | Daytona TLS | Notes |
 |--------|-------------|-------|
+| `*.supabase.co` | Allowed | Developer tools whitelist |
 | `api.anthropic.com` | Allowed | AI/ML platform whitelist |
 | `api.openai.com` | Allowed | AI/ML platform whitelist |
-| `*.supabase.co` | Allowed | Developer tools whitelist |
 | `api.meios.ai` | Blocked | Custom domain, not whitelisted |
 | `*.run.app` | Blocked | GCP Cloud Run, not whitelisted |
 
-**Upgrade path:** When we upgrade to Daytona Tier 3 ($500 top-up + business
-email), full internet access is available. We can then switch `ANTHROPIC_BASE_URL`
-to `https://api.meios.ai` and use the Cloud Run proxy directly. The Supabase
-Edge Function remains as a fallback.
+**Upgrade path:** Daytona Tier 3+ ($500 top-up + business email) provides full
+internet access. Sandboxes could then call LiteLLM on Cloud Run directly,
+eliminating the Edge Function hop.
 
 ### Daytona Tier Reference
 
@@ -80,28 +91,14 @@ Edge Function remains as a fallback.
 | Tier 3 | Business email + $500 top-up | **Full internet access** |
 | Tier 4 | $2000/30d top-up | Full internet access |
 
-`networkAllowList` parameter at sandbox creation is ignored on Tier 1/2.
-
 ### BYOK (future)
 
-Users provide their own Anthropic/OpenAI keys. Design:
+Users provide their own API keys. Design:
 
 - Keys encrypted (AES-256-GCM) in Supabase
-- Gateway resolves per-user key at request time
+- LiteLLM supports per-user key override via metadata
 - Redacted in all API responses and logs
-- Needed when: billing/metering per user, user wants own Claude account
-
-### Industry Reference
-
-| Platform | System Key | BYOK | Key Location |
-|----------|-----------|------|-------------|
-| Cursor Pro | Pooled, server-proxy | Client-side only | Server / Client |
-| Replit Agent | Platform-managed | Encrypted secrets | Server |
-| Windsurf | Partial pool | Required for some models | Client |
-| openclaw 3.8 | N/A (self-hosted) | SecretRef (env/file/exec) | Local |
-
-Server-side key storage is necessary when agents run on cloud sandboxes.
-BYOK keys that stay client-side are simpler but only work for local agents.
+- Needed when: user wants higher budget or own provider account
 
 ## Sandbox Isolation
 

@@ -90,12 +90,17 @@ async function forwardRequest(c: Context, targetUrl: string): Promise<Response> 
   try {
     const upstream = await fetch(targetUrl, init)
 
-    // Pass through the response as-is (preserves { ok, data, error } envelope)
-    const body = await upstream.text()
+    // Pass through the response as-is (binary-safe for images, etc.)
+    const contentType = upstream.headers.get('Content-Type') ?? 'application/json'
+    const body = contentType.startsWith('image/') || contentType === 'application/octet-stream'
+      ? await upstream.arrayBuffer()
+      : await upstream.text()
+
     return new Response(body, {
       status: upstream.status,
       headers: {
-        'Content-Type': upstream.headers.get('Content-Type') ?? 'application/json',
+        'Content-Type': contentType,
+        'Cache-Control': upstream.headers.get('Cache-Control') ?? '',
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',

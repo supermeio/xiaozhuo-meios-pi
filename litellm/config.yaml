@@ -25,6 +25,16 @@ model_list:
       model: gemini/gemini-flash-lite-latest
       api_key: os.environ/GOOGLE_API_KEY
 
+  # Google Gemini — image generation (Nano Banana)
+  - model_name: gemini-3.1-flash-image-preview
+    litellm_params:
+      model: gemini/gemini-3.1-flash-image-preview
+      api_key: os.environ/GOOGLE_API_KEY
+  - model_name: gemini-3-pro-image-preview
+    litellm_params:
+      model: gemini/gemini-3-pro-image-preview
+      api_key: os.environ/GOOGLE_API_KEY
+
   # Anthropic
   - model_name: claude-haiku-4-5-20251001
     litellm_params:

@@ -9,6 +9,7 @@
  *   GET    /sessions/:id/messages → { ok, data: { messages: [{role, text, content}] } }
  *   DELETE /sessions/:id          → { ok, data: null }
  *   GET    /closet                → { ok, data: { items: [...] } }
+ *   GET    /files/*               → binary file from workspace
  *   GET    /cron                  → { ok, data: { tasks: [...] } }
  *
  * Usage:
@@ -331,6 +332,55 @@ async function getOrCreateSession(sessionId?: string) {
   return { session, sessionId: id }
 }
 
+// ── Content block helpers ────────────────────────────────────
+
+const IMAGE_RE = /!\[([^\]]*)\]\(([^)]+\.(png|jpg|jpeg|webp|gif))\)/g
+
+/**
+ * Parse agent text into content blocks. Splits on markdown image
+ * references, converting them to image blocks and keeping surrounding
+ * text as text blocks.
+ */
+function textToContentBlocks(text: string): ParsedContentBlock[] {
+  const blocks: ParsedContentBlock[] = []
+  let lastIndex = 0
+
+  for (const match of text.matchAll(IMAGE_RE)) {
+    const [fullMatch, alt, filePath] = match
+    const matchIndex = match.index!
+
+    // Text before this image
+    const before = text.slice(lastIndex, matchIndex).trim()
+    if (before) blocks.push({ type: 'text', text: before })
+
+    // Check if the file actually exists in workspace
+    const absPath = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath)
+    if (existsSync(absPath)) {
+      const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
+      blocks.push({
+        type: 'image',
+        url: `/files/${filePath}`,
+        imageId,
+        alt: alt || undefined,
+      })
+    } else {
+      // File doesn't exist, keep as text
+      blocks.push({ type: 'text', text: fullMatch })
+    }
+
+    lastIndex = matchIndex + fullMatch.length
+  }
+
+  // Remaining text after last image
+  const remaining = text.slice(lastIndex).trim()
+  if (remaining) blocks.push({ type: 'text', text: remaining })
+
+  // If no blocks were created, return the full text as a single block
+  if (blocks.length === 0) blocks.push({ type: 'text', text })
+
+  return blocks
+}
+
 // ── Chat ────────────────────────────────────────────────────
 
 interface ChatResult {
@@ -363,7 +413,7 @@ async function chat(session: any, input: string): Promise<ChatResult> {
             .map((b: ContentBlock) => b.text)
             .join('') || '[无回复]'
         }
-        const content: ParsedContentBlock[] = [{ type: 'text', text }]
+        const content = textToContentBlocks(text)
         resolve({ reply: text, content })
       }
     })
@@ -529,6 +579,47 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    // ── GET /files/* — serve workspace files (images, etc.) ──
+    if (url.pathname.startsWith('/files/') && method === 'GET') {
+      const relPath = decodeURIComponent(url.pathname.slice('/files/'.length))
+
+      // Security: prevent path traversal
+      if (relPath.includes('..') || relPath.startsWith('/')) {
+        fail(res, 'Invalid path', 400)
+        return
+      }
+
+      const absPath = resolve(WORKSPACE, relPath)
+
+      // Ensure resolved path is within workspace
+      if (!absPath.startsWith(WORKSPACE)) {
+        fail(res, 'Access denied', 403)
+        return
+      }
+
+      if (!existsSync(absPath)) {
+        fail(res, 'File not found', 404)
+        return
+      }
+
+      const ext = absPath.split('.').pop()?.toLowerCase() ?? ''
+      const mimeTypes: Record<string, string> = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+        webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml',
+      }
+      const contentType = mimeTypes[ext] ?? 'application/octet-stream'
+      const fileData = readFileSync(absPath)
+
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': fileData.length.toString(),
+        'Cache-Control': 'public, max-age=86400',
+        ...CORS_HEADERS,
+      })
+      res.end(fileData)
+      return
+    }
+
     // ── 404 ──
     fail(res, 'not found', 404)
   } catch (err: any) {
@@ -552,6 +643,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`   GET    /sessions/:id/messages`)
   console.log(`   DELETE /sessions/:id`)
   console.log(`   GET    /closet`)
+  console.log(`   GET    /files/*               workspace files`)
   console.log(`   GET    /cron`)
   console.log('')
 })

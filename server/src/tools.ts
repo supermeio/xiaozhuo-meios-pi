@@ -4,6 +4,7 @@ import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { Theme } from '@mariozechner/pi-coding-agent'
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs'
 import { join, basename } from 'node:path'
+import { randomBytes } from 'node:crypto'
 
 // ── workspace root (resolved at runtime) ──
 let _workspaceRoot = ''
@@ -172,10 +173,114 @@ export const suggestOutfitTool: ToolDefinition<typeof SuggestOutfitParams, strin
   },
 }
 
+// ════════════════════════════════════════════
+//  Tool 5: generate_image — 生成图片
+// ════════════════════════════════════════════
+
+const VALID_ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'] as const
+
+const GenerateImageParams = Type.Object({
+  prompt: Type.String({ description: '图片描述，具体描述你想生成的画面内容' }),
+  filename: Type.String({ description: '保存文件名（不含扩展名），如 casual-spring-outfit' }),
+  subfolder: Type.Optional(Type.String({ description: '保存子目录（相对于 workspace），如 outfits/2026-03-14。默认为 outfits' })),
+  aspectRatio: Type.Optional(Type.String({ description: '宽高比：1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9。默认 3:4（适合服装展示）' })),
+  quality: Type.Optional(Type.String({ description: '质量：standard（快速，默认）或 pro（高质量，较慢）' })),
+})
+
+export const generateImageTool: ToolDefinition<typeof GenerateImageParams, string> = {
+  name: 'generate_image',
+  label: '生成图片',
+  description: '使用 AI 生成图片。适用于生成穿搭效果图、服装展示图等。图片会保存到 workspace 目录。',
+  parameters: GenerateImageParams,
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    const filename = params.filename as string
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(filename) || filename.length > 80) {
+      return textResult('Invalid filename. Use lowercase letters, numbers, hyphens, and dots only.', '')
+    }
+
+    const subfolder = (params.subfolder as string) || 'outfits'
+    const aspectRatio = (params.aspectRatio as string) || '3:4'
+    const quality = (params.quality as string) || 'standard'
+    const modelId = quality === 'pro'
+      ? 'gemini-3-pro-image-preview'
+      : 'gemini-3.1-flash-image-preview'
+
+    // Build output dir
+    const outDir = ws(subfolder)
+    if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true })
+
+    // Call Gemini image generation via LiteLLM proxy
+    const geminiBaseUrl = process.env.GEMINI_BASE_URL
+    const geminiApiKey = process.env.GEMINI_API_KEY
+    if (!geminiBaseUrl || !geminiApiKey) {
+      return textResult('Image generation not available: missing GEMINI_BASE_URL or GEMINI_API_KEY.', '')
+    }
+
+    const apiUrl = `${geminiBaseUrl}/models/${modelId}:generateContent`
+    let response: Response
+    try {
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': geminiApiKey,
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: params.prompt }] }],
+          generationConfig: {
+            responseModalities: ['TEXT', 'IMAGE'],
+            ...(aspectRatio !== '1:1' ? { aspectRatio } : {}),
+          },
+        }),
+      })
+    } catch (err: any) {
+      return textResult(`Image generation request failed: ${err.message}`, '')
+    }
+
+    if (!response.ok) {
+      const errBody = await response.text()
+      return textResult(`Image generation failed (${response.status}): ${errBody.slice(0, 200)}`, '')
+    }
+
+    const result = await response.json() as any
+    const parts = result?.candidates?.[0]?.content?.parts ?? []
+
+    // Extract image data
+    const imagePart = parts.find((p: any) => p.inlineData?.data)
+    if (!imagePart) {
+      const textParts = parts.filter((p: any) => p.text).map((p: any) => p.text).join('\n')
+      return textResult(`No image generated. Model response: ${textParts || 'empty'}`, '')
+    }
+
+    const mimeType = imagePart.inlineData.mimeType || 'image/png'
+    const ext = mimeType.includes('webp') ? 'webp' : mimeType.includes('jpeg') ? 'jpg' : 'png'
+    const imageBuffer = Buffer.from(imagePart.inlineData.data, 'base64')
+
+    // Save to workspace
+    const outputFilename = `${filename}.${ext}`
+    const outputPath = join(outDir, outputFilename)
+    writeFileSync(outputPath, imageBuffer)
+
+    // Extract companion text if any
+    const textContent = parts.filter((p: any) => p.text).map((p: any) => p.text).join('\n')
+
+    const relativePath = `${subfolder}/${outputFilename}`
+    const sizeKb = Math.round(imageBuffer.length / 1024)
+    const summary = [
+      `已生成图片并保存到 ${relativePath} (${sizeKb}KB)`,
+      `模型: ${modelId}，宽高比: ${aspectRatio}`,
+      textContent ? `描述: ${textContent}` : '',
+    ].filter(Boolean).join('\n')
+
+    return textResult(summary, relativePath)
+  },
+}
+
 // ── Export all tools ──
 export const wardrobeTools: ToolDefinition[] = [
   saveClothingTool,
   listClosetTool,
   getClothingTool,
   suggestOutfitTool,
+  generateImageTool,
 ]

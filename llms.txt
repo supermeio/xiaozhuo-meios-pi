@@ -1,0 +1,36 @@
+# meios
+
+> AI wardrobe/outfit assistant platform. Each user gets an isolated sandbox with a personal AI agent.
+
+## API
+
+Base URL: https://api.meios.ai
+Auth: Bearer token (Supabase JWT or meios API key with `meios_` prefix)
+OpenAPI spec: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/openapi.yaml
+
+## Quick Start
+
+1. Sign up at meios.ai (or via Supabase Auth API)
+2. Create API key: POST /api/v1/keys
+3. Get sandbox URL: GET /api/v1/sandbox/url
+4. Chat: POST {sandbox_url}/chat with {"message": "..."}
+
+## Endpoints
+
+- POST /api/v1/keys — Create API key
+- GET /api/v1/keys — List API keys
+- DELETE /api/v1/keys/:id — Revoke API key
+- GET /api/v1/sandbox/url — Get direct sandbox access URL
+- POST /chat — Send message (via gateway or direct)
+- GET /sessions — List chat sessions
+- GET /sessions/:id/messages — Get session messages
+- DELETE /sessions/:id — Delete session
+- GET /closet — Get wardrobe data
+- GET /health — Health check
+
+## Docs
+
+- AGENTS.md: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/AGENTS.md
+- Architecture: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/docs/architecture.md
+- Security: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/docs/security.md
+- Skill: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/skills/meios-agent/SKILL.md

@@ -7,10 +7,27 @@ description: Connect to meios AI wardrobe assistant via API key. Use when the us
 
 meios is an AI wardrobe/outfit assistant. Each user gets an isolated sandbox. You interact with it via API.
 
+## Getting an API Key
+
+You need a meios API key (`meios_` prefix) from the user. Existing keys only show prefixes and **cannot be copied** — the user must create a new one.
+
+Ask the user to do this:
+
+> 1. Open the **Meio** app on your iPhone
+> 2. Tap the **gear icon** (top right) to open Settings
+> 3. Tap **API Keys**
+> 4. Tap **+** (top right) to create a new key
+> 5. A full key appears once — tap the **copy icon** next to it
+> 6. Paste the key back here
+
+The key looks like: `meios_6c4334cc88b796bdecfc88f33259d00e`
+
+If the user already has a key saved, they can use that directly.
+
 ## Quick Start (3 commands)
 
 ```bash
-MEIOS_API_KEY="meios_..."  # User provides this
+MEIOS_API_KEY="meios_..."  # from the step above
 
 # 1. Chat via gateway (simplest — no setup needed)
 curl -s https://api.meios.ai/chat \

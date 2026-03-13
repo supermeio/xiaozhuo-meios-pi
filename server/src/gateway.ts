@@ -6,7 +6,7 @@
  *   GET    /health                → { ok, data: { uptime, model, version } }
  *   POST   /chat                  → { ok, data: { reply, sessionId } }
  *   GET    /sessions              → { ok, data: { sessions: [...] } }
- *   GET    /sessions/:id/messages → { ok, data: { messages: [{role, text}] } }
+ *   GET    /sessions/:id/messages → { ok, data: { messages: [{role, text, content}] } }
  *   DELETE /sessions/:id          → { ok, data: null }
  *   GET    /closet                → { ok, data: { items: [...] } }
  *   GET    /cron                  → { ok, data: { tasks: [...] } }
@@ -170,9 +170,20 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 // ── JSONL parsing ───────────────────────────────────────────
 
+interface ParsedContentBlock {
+  type: 'text' | 'image'
+  text?: string
+  url?: string
+  imageId?: string
+  width?: number
+  height?: number
+  alt?: string
+}
+
 interface ParsedMessage {
   role: 'user' | 'assistant'
   text: string
+  content: ParsedContentBlock[]
 }
 
 /**
@@ -206,16 +217,25 @@ function parseJsonlMessages(content: string): ParsedMessage[] {
 
       const blocks = Array.isArray(msg.content) ? msg.content : [msg.content]
 
-      // Extract text from content blocks, skip thinking/toolCall/etc
-      const text = blocks
-        .filter((b: ContentBlock) => b.type === 'text' && typeof b.text === 'string')
-        .map((b: ContentBlock) => b.text)
+      // Build content blocks from raw agent blocks
+      const contentBlocks: ParsedContentBlock[] = []
+      for (const b of blocks) {
+        if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+          contentBlocks.push({ type: 'text', text: b.text })
+        }
+        // Future: handle image blocks from agent here
+      }
+
+      // Skip empty messages
+      if (contentBlocks.length === 0) continue
+
+      // Backward-compat: concatenate text blocks
+      const text = contentBlocks
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
         .join('\n')
 
-      // Skip empty text results
-      if (!text.trim()) continue
-
-      messages.push({ role: msg.role, text })
+      messages.push({ role: msg.role, text, content: contentBlocks })
     } catch {
       // Skip malformed lines
     }
@@ -313,10 +333,15 @@ async function getOrCreateSession(sessionId?: string) {
 
 // ── Chat ────────────────────────────────────────────────────
 
-async function chat(session: any, input: string): Promise<string> {
+interface ChatResult {
+  reply: string
+  content: ParsedContentBlock[]
+}
+
+async function chat(session: any, input: string): Promise<ChatResult> {
   const systemPrompt = loadSystemPrompt()
 
-  return new Promise<string>((resolveText) => {
+  return new Promise<ChatResult>((resolve) => {
     const textChunks: string[] = []
 
     const unsub = session.subscribe((event: AgentEvent) => {
@@ -328,16 +353,18 @@ async function chat(session: any, input: string): Promise<string> {
       }
       if (event.type === 'agent_end') {
         unsub()
+        let text: string
         if (textChunks.length > 0) {
-          resolveText(textChunks.join(''))
+          text = textChunks.join('')
         } else {
-          const text = (event.messages ?? [])
+          text = (event.messages ?? [])
             .flatMap((m: AgentMessage) => m.content ?? [])
             .filter((b: ContentBlock) => b.type === 'text')
             .map((b: ContentBlock) => b.text)
-            .join('')
-          resolveText(text || '[无回复]')
+            .join('') || '[无回复]'
         }
+        const content: ParsedContentBlock[] = [{ type: 'text', text }]
+        resolve({ reply: text, content })
       }
     })
 
@@ -399,8 +426,8 @@ const server = createServer(async (req, res) => {
         fail(res, err.message, 400)
         return
       }
-      const reply = await chat(session, message)
-      ok(res, { reply, sessionId })
+      const result = await chat(session, message)
+      ok(res, { reply: result.reply, content: result.content, sessionId })
       return
     }
 

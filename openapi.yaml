@@ -107,6 +107,41 @@ paths:
               schema:
                 $ref: '#/components/schemas/SandboxUrl'
 
+  /api/v1/sandbox/ssh:
+    post:
+      summary: Create SSH access token
+      description: |
+        Creates a temporary SSH token for direct terminal access to the sandbox.
+        Connect with: ssh <token>@ssh.app.daytona.io
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expires_in_minutes:
+                  type: integer
+                  default: 60
+                  description: Token expiry in minutes
+      responses:
+        '200':
+          description: SSH token created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      token: { type: string, description: 'SSH token' }
+                      host: { type: string, example: 'ssh.app.daytona.io' }
+                      command: { type: string, description: 'Ready-to-use SSH command' }
+                      expires_in_minutes: { type: integer }
+        '404':
+          description: No active sandbox
+
   /chat:
     post:
       summary: Send a message

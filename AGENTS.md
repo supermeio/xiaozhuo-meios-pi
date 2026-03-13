@@ -96,6 +96,30 @@ DELETE /api/v1/keys/:id          # Revoke a key
 
 All key management endpoints require authentication (JWT or existing API key).
 
+## SSH Access
+
+For full terminal access to your sandbox:
+
+```http
+POST /api/v1/sandbox/ssh
+Authorization: Bearer meios_<your_key>
+Content-Type: application/json
+
+{"expires_in_minutes": 60}
+
+→ {
+    "ok": true,
+    "data": {
+      "token": "abc123...",
+      "host": "ssh.app.daytona.io",
+      "command": "ssh abc123...@ssh.app.daytona.io",
+      "expires_in_minutes": 60
+    }
+  }
+```
+
+Then connect: `ssh <token>@ssh.app.daytona.io`
+
 ## Rate Limits
 
 - **Gateway proxy:** No additional rate limit (passes through to sandbox)

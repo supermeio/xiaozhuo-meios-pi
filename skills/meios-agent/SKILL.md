@@ -94,11 +94,59 @@ curl -s -X DELETE "$SANDBOX_URL/sessions/$SESSION_ID"
 curl -s "$SANDBOX_URL/closet"
 ```
 
-## Two Access Paths
+## Step 4: SSH into Sandbox
+
+For full terminal access (install packages, edit files, run scripts):
+
+```bash
+# Create SSH token (expires in 60 minutes by default)
+SSH_DATA=$(curl -s -X POST https://api.meios.ai/api/v1/sandbox/ssh \
+  -H "Authorization: Bearer $MEIOS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"expires_in_minutes": 60}')
+
+echo "$SSH_DATA" | python3 -m json.tool
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "data": {
+    "token": "abc123...",
+    "host": "ssh.app.daytona.io",
+    "command": "ssh abc123...@ssh.app.daytona.io",
+    "expires_in_minutes": 60
+  }
+}
+```
+
+Connect:
+```bash
+SSH_CMD=$(echo "$SSH_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['command'])")
+$SSH_CMD
+```
+
+Once inside the sandbox:
+- Workspace: `/home/daytona/meios/workspace/`
+- Server code: `/home/daytona/meios/server/`
+- Gateway running on port 18800
+- Node.js 20, npm available
+
+**Use cases:**
+- Install additional tools or packages
+- Inspect/modify files in the wardrobe workspace
+- Debug server logs
+- Run custom scripts
+
+**Token expiry:** Default 60 minutes. Request a longer duration with `expires_in_minutes`. When expired, create a new token.
+
+## Three Access Paths
 
 | Path | When to use |
 |------|-------------|
-| **Direct** (above) | Low latency, streaming, heavy agent usage |
+| **Direct URL** (Step 2-3) | Low latency HTTP, streaming, heavy agent usage |
+| **SSH** (Step 4) | Full terminal access, file editing, package install |
 | **Via Gateway** | Simple calls, no URL management |
 
 Gateway path — same endpoints, just use `https://api.meios.ai` as base URL with auth header:

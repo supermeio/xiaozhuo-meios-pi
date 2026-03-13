@@ -1,6 +1,6 @@
 import type { Context } from 'hono'
 import type { AuthUser } from './auth.js'
-import { resolveSignedUrl, provisionSandbox } from './sandbox.js'
+import { resolveSignedUrl, provisionSandbox, createSshToken } from './sandbox.js'
 import { getSandboxByUserId } from './db.js'
 import { logError } from './log.js'
 
@@ -47,5 +47,42 @@ export async function getSandboxUrl(c: Context): Promise<Response> {
   } catch (err: any) {
     logError('sandbox-url', 'failed to resolve sandbox URL', err, { userId: user.id })
     return c.json({ ok: false, error: `Failed to get sandbox URL: ${err.message}` }, 500)
+  }
+}
+
+/**
+ * POST /api/v1/sandbox/ssh
+ *
+ * Creates an SSH access token for the user's sandbox.
+ * Token expires after the specified duration (default: 60 minutes).
+ *
+ * Request body (optional):
+ *   { "expires_in_minutes": 60 }
+ *
+ * Response:
+ *   { ok: true, data: { token, host, command, expires_in_minutes } }
+ */
+export async function getSandboxSsh(c: Context): Promise<Response> {
+  const user = c.get('user') as AuthUser
+
+  try {
+    const body = await c.req.json().catch(() => ({}))
+    const expiresInMinutes = body.expires_in_minutes ?? 60
+
+    const result = await createSshToken(user.id, expiresInMinutes)
+    if (!result) {
+      return c.json({ ok: false, error: 'No active sandbox found. Send a chat message first to provision one.' }, 404)
+    }
+
+    return c.json({
+      ok: true,
+      data: {
+        ...result,
+        expires_in_minutes: expiresInMinutes,
+      },
+    })
+  } catch (err: any) {
+    logError('sandbox-ssh', 'failed to create SSH token', err, { userId: user.id })
+    return c.json({ ok: false, error: `Failed to create SSH access: ${err.message}` }, 500)
   }
 }

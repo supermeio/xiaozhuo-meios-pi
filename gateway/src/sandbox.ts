@@ -238,6 +238,25 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 }
 
 /**
+ * Create an SSH access token for the user's sandbox.
+ * Token format: ssh <token>@ssh.app.daytona.io
+ */
+export async function createSshToken(userId: string, expiresInMinutes = 60): Promise<{ token: string; host: string; command: string } | null> {
+  const sandbox = await getSandboxByUserId(userId)
+  if (!sandbox) return null
+
+  const daytona = getDaytona()
+  const sb = await daytona.get(sandbox.daytona_id)
+  const sshAccess = await sb.createSshAccess(expiresInMinutes)
+
+  const token = sshAccess.token
+  const host = 'ssh.app.daytona.io'
+
+  slog('SSH token created', { userId, expiresInMinutes })
+  return { token, host, command: `ssh ${token}@${host}` }
+}
+
+/**
  * Force-refresh a signed URL (e.g., after a 401 from the sandbox).
  */
 export async function forceRefreshSignedUrl(userId: string): Promise<string | null> {

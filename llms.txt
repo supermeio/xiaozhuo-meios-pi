@@ -21,6 +21,7 @@ OpenAPI spec: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/openapi.y
 - GET /api/v1/keys — List API keys
 - DELETE /api/v1/keys/:id — Revoke API key
 - GET /api/v1/sandbox/url — Get direct sandbox access URL
+- POST /api/v1/sandbox/ssh — Create SSH access token (ssh <token>@ssh.app.daytona.io)
 - POST /chat — Send message (via gateway or direct)
 - GET /sessions — List chat sessions
 - GET /sessions/:id/messages — Get session messages

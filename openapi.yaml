@@ -1,0 +1,256 @@
+openapi: 3.1.0
+info:
+  title: meios API
+  description: |
+    AI wardrobe/outfit assistant platform API.
+    Each user gets an isolated sandbox with a personal AI agent.
+  version: 0.1.0
+  contact:
+    url: https://github.com/supermeio/xiaozhuo-meios-pi
+
+servers:
+  - url: https://api.meios.ai
+    description: Production
+
+security:
+  - bearerAuth: []
+
+paths:
+  /ping:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      version: { type: string, example: '0.1.0' }
+
+  /api/v1/keys:
+    post:
+      summary: Create API key
+      description: |
+        Generate a new API key for agent/developer access.
+        The full key is returned only once — store it securely.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, default: 'default', description: 'Human-readable key name' }
+      responses:
+        '201':
+          description: Key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      summary: List API keys
+      description: Returns key prefixes and metadata (never the full key).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKeyInfo'
+
+  /api/v1/keys/{id}:
+    delete:
+      summary: Revoke API key
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+
+  /api/v1/sandbox/url:
+    get:
+      summary: Get sandbox direct access URL
+      description: |
+        Returns a signed preview URL for direct sandbox access.
+        Auto-provisions a sandbox if the user doesn't have one.
+        URL expires after 24h — call again to refresh.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxUrl'
+
+  /chat:
+    post:
+      summary: Send a message
+      description: Send a message to the user's AI agent (proxied to sandbox).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string, description: 'User message' }
+                sessionId: { type: string, description: 'Session ID (auto-generated if omitted)' }
+      responses:
+        '200':
+          description: Agent response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      reply: { type: string }
+                      sessionId: { type: string }
+
+  /sessions:
+    get:
+      summary: List sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: array
+                    items:
+                      type: object
+
+  /sessions/{id}/messages:
+    get:
+      summary: Get session messages
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+
+  /sessions/{id}:
+    delete:
+      summary: Delete session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+
+  /closet:
+    get:
+      summary: Get wardrobe data
+      responses:
+        '200':
+          description: OK
+
+  /health:
+    get:
+      summary: Sandbox health check
+      description: Only accessible via direct sandbox URL.
+      security: []
+      responses:
+        '200':
+          description: OK
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Supabase JWT or meios API key (prefix: meios_).
+        API keys are recommended for agent access.
+
+  schemas:
+    ApiKeyCreated:
+      type: object
+      properties:
+        ok: { type: boolean }
+        data:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            key: { type: string, description: 'Full API key (shown only once)', example: 'meios_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6' }
+            key_prefix: { type: string, example: 'meios_a1b2c3d4' }
+            name: { type: string }
+            created_at: { type: string, format: date-time }
+
+    ApiKeyInfo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        key_prefix: { type: string }
+        name: { type: string }
+        last_used: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    SandboxUrl:
+      type: object
+      properties:
+        ok: { type: boolean }
+        data:
+          type: object
+          properties:
+            url: { type: string, description: 'Signed preview URL (24h TTL)' }
+            expires_at: { type: string, format: date-time }
+            port: { type: integer, example: 18800 }
+            endpoints:
+              type: object
+              properties:
+                chat: { type: string, example: '/chat' }
+                health: { type: string, example: '/health' }
+                sessions: { type: string, example: '/sessions' }
+                closet: { type: string, example: '/closet' }
+
+  responses:
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean, example: false }
+              error: { type: string, example: 'Missing or invalid Authorization header' }

@@ -165,7 +165,24 @@ pi-agent: getModel('anthropic', 'claude-haiku-4-5')
     ← Anthropic response (native, tool_use blocks preserved)
 ```
 
-## API Endpoints (meios gateway, port 18800)
+## API Endpoints
+
+### Auth Gateway (api.meios.ai)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/ping` | Public | Health check |
+| `POST` | `/api/v1/keys` | JWT/Key | Create API key |
+| `GET` | `/api/v1/keys` | JWT/Key | List API keys |
+| `DELETE` | `/api/v1/keys/:id` | JWT/Key | Revoke API key |
+| `GET` | `/api/v1/sandbox/url` | JWT/Key | Get sandbox direct access URL |
+| `*` | `/*` | JWT/Key | Proxy to sandbox |
+
+Auth supports Supabase JWT or meios API key (`meios_` prefix). See [AGENTS.md](../AGENTS.md) for agent integration guide.
+
+OpenAPI spec: [openapi.yaml](../openapi.yaml)
+
+### Sandbox (port 18800, via Gateway or direct URL)
 
 | Method | Path | Description |
 |--------|------|-------------|

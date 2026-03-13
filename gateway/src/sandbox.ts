@@ -138,6 +138,8 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     autoStopInterval: 0,
     autoArchiveInterval: 10080, // 7 days
     envVars: {
+      // User identity
+      MEIOS_USER_ID: userId,
       // All providers use OpenAI-compatible format via LiteLLM.
       // The sandbox sends requests to the Edge Function, which relays to LiteLLM.
       // LiteLLM routes to the correct provider based on model name.
@@ -152,6 +154,14 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
       GOOGLE_API_KEY: virtualKey,
       KIMI_BASE_URL: proxyUrl + '/moonshot',
       KIMI_API_KEY: virtualKey,
+      // R2 file sync (optional — sync disabled if not set)
+      ...(config.r2?.endpoint ? {
+        R2_ENDPOINT: config.r2.endpoint,
+        R2_ACCESS_KEY_ID: config.r2.accessKeyId,
+        R2_SECRET_ACCESS_KEY: config.r2.secretAccessKey,
+        R2_BUCKET: config.r2.bucket ?? 'meios-images',
+        R2_PUBLIC_URL: config.r2.publicUrl ?? '',
+      } : {}),
     },
   }, {
     timeout: 120,
@@ -176,6 +186,7 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
 
   // 3b. Write persistent .env.token — server reads this on startup
   const envTokenLines = [
+    `MEIOS_USER_ID=${userId}`,
     `OPENAI_BASE_URL=${proxyUrl}`,
     `OPENAI_API_KEY=${virtualKey}`,
     `ANTHROPIC_BASE_URL=${proxyUrl}`,
@@ -185,6 +196,13 @@ export async function provisionSandbox(userId: string): Promise<{ sandbox: Sandb
     `GOOGLE_API_KEY=${virtualKey}`,
     `KIMI_BASE_URL=${proxyUrl}/moonshot`,
     `KIMI_API_KEY=${virtualKey}`,
+    ...(config.r2?.endpoint ? [
+      `R2_ENDPOINT=${config.r2.endpoint}`,
+      `R2_ACCESS_KEY_ID=${config.r2.accessKeyId}`,
+      `R2_SECRET_ACCESS_KEY=${config.r2.secretAccessKey}`,
+      `R2_BUCKET=${config.r2.bucket ?? 'meios-images'}`,
+      `R2_PUBLIC_URL=${config.r2.publicUrl ?? ''}`,
+    ] : []),
   ].join('\n')
   await sb.process.executeCommand(
     `cat > /home/daytona/meios/.env.token << 'EOF'\n${envTokenLines}\nEOF`,

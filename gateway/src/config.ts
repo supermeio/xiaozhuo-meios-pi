@@ -27,4 +27,12 @@ export const config = {
       ?? `${required('SUPABASE_URL')}/functions/v1/llm-proxy`,
     gatewayPort: 18800,
   },
+  // R2 file sync (optional — sync disabled in sandbox if not configured)
+  r2: process.env.R2_ENDPOINT ? {
+    endpoint: process.env.R2_ENDPOINT,
+    accessKeyId: process.env.R2_ACCESS_KEY_ID ?? '',
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? '',
+    bucket: process.env.R2_BUCKET ?? 'meios-images',
+    publicUrl: process.env.R2_PUBLIC_URL ?? '',  // e.g. https://images.meios.ai
+  } : undefined,
 } as const

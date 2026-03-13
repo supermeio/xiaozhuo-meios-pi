@@ -25,6 +25,7 @@ import { resolve, join } from 'node:path'
 import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 import { initCron, listTasks } from './cron.js'
 import { initHeartbeat } from './heartbeat.js'
+import { initSync } from './sync.js'
 
 // ── pi-agent event types ────────────────────────────────────
 
@@ -126,9 +127,10 @@ const model = {
   maxTokens: 8192,
 }
 
-// ── Init cron & heartbeat ───────────────────────────────────
+// ── Init cron, heartbeat & file sync ────────────────────────
 initCron(WORKSPACE)
 initHeartbeat(WORKSPACE)
+initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message))
 
 // ── Response helpers ────────────────────────────────────────
 

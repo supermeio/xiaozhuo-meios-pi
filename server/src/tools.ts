@@ -193,6 +193,7 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
   description: '使用 AI 生成图片。适用于生成穿搭效果图、服装展示图等。图片会保存到 workspace 目录。',
   parameters: GenerateImageParams,
   async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    console.log('[generate_image] TOOL CALLED with params:', JSON.stringify(params))
     const filename = params.filename as string
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(filename) || filename.length > 80) {
       return textResult('Invalid filename. Use lowercase letters, numbers, hyphens, and dots only.', '')
@@ -250,6 +251,8 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     const message = choices[0]?.message ?? {}
     const content = message?.content
 
+    console.log('[generate_image] API response status:', response.status)
+
     // Extract image from LiteLLM response — supports multiple formats:
     // 1. message.images[].image_url.url (LiteLLM Gemini image gen)
     // 2. content[].image_url.url (OpenAI multimodal)
@@ -284,9 +287,12 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
       }
     }
 
+    console.log('[generate_image] images array length:', images.length, 'imageData found:', !!imageData, 'content type:', typeof content, 'isArray:', Array.isArray(content))
+
     if (!imageData) {
       return textResult(`No image generated. Model response: ${textContent || JSON.stringify(result).slice(0, 300)}`, '')
     }
+    console.log('[generate_image] image extracted, size:', imageData.length, 'mime:', imageMimeType)
 
     const ext = imageMimeType.includes('webp') ? 'webp' : imageMimeType.includes('jpeg') ? 'jpg' : 'png'
     const imageBuffer = Buffer.from(imageData, 'base64')

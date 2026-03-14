@@ -135,19 +135,23 @@ initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message
 // ── Response helpers ────────────────────────────────────────
 
 const CORS_HEADERS = {
-  'Content-Type': 'application/json',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 } as const
 
+const JSON_HEADERS = {
+  'Content-Type': 'application/json',
+  ...CORS_HEADERS,
+} as const
+
 function ok<T>(res: ServerResponse, data: T, status = 200) {
-  res.writeHead(status, CORS_HEADERS)
+  res.writeHead(status, JSON_HEADERS)
   res.end(JSON.stringify({ ok: true, data }))
 }
 
 function fail(res: ServerResponse, error: string, status = 400) {
-  res.writeHead(status, CORS_HEADERS)
+  res.writeHead(status, JSON_HEADERS)
   res.end(JSON.stringify({ ok: false, error }))
 }
 

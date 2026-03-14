@@ -290,9 +290,6 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     const outputPath = join(outDir, outputFilename)
     writeFileSync(outputPath, imageBuffer)
 
-    // Extract companion text if any
-    const textContent = parts.filter((p: any) => p.text).map((p: any) => p.text).join('\n')
-
     const relativePath = `${subfolder}/${outputFilename}`
     const sizeKb = Math.round(imageBuffer.length / 1024)
     const summary = [

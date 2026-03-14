@@ -338,7 +338,7 @@ async function getOrCreateSession(sessionId?: string) {
 
 const IMAGE_RE = /!\[([^\]]*)\]\(([^)]+\.(png|jpg|jpeg|webp|gif))\)/g
 // Fallback: detect bare file paths like `outfits/foo.png` in text
-const BARE_PATH_RE = /(?:^|[\s`])(((?:outfits|closet|looks)\/[^\s`"'<>]+\.(png|jpg|jpeg|webp|gif)))(?:[\s`]|$)/gm
+const BARE_PATH_RE = /(?:^|[\s`])(((?:workspace\/)?(?:outfits|closet|looks)\/[^\s`"'<>]+\.(png|jpg|jpeg|webp|gif)))(?:[\s`]|$)/gm
 
 /**
  * Parse agent text into content blocks. Splits on markdown image
@@ -350,8 +350,10 @@ function textToContentBlocks(text: string): ParsedContentBlock[] {
   let lastIndex = 0
 
   for (const match of text.matchAll(IMAGE_RE)) {
-    const [fullMatch, alt, filePath] = match
+    const [fullMatch, alt, rawFilePath] = match
     const matchIndex = match.index!
+    // Strip optional workspace/ prefix
+    const filePath = rawFilePath.replace(/^workspace\//, '')
 
     // Text before this image
     const before = text.slice(lastIndex, matchIndex).trim()
@@ -388,7 +390,9 @@ function textToContentBlocks(text: string): ParsedContentBlock[] {
     let foundBareImage = false
 
     for (const match of fullText.matchAll(BARE_PATH_RE)) {
-      const filePath = match[1]
+      // Strip optional workspace/ prefix for file resolution and URL
+      const rawPath = match[1]
+      const filePath = rawPath.replace(/^workspace\//, '')
       const matchIndex = match.index!
       const absPath = resolve(WORKSPACE, filePath)
 

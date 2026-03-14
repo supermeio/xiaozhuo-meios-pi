@@ -209,28 +209,28 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     const outDir = ws(subfolder)
     if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true })
 
-    // Call Gemini image generation via LiteLLM proxy
-    const geminiBaseUrl = process.env.GEMINI_BASE_URL
-    const geminiApiKey = process.env.GEMINI_API_KEY
-    if (!geminiBaseUrl || !geminiApiKey) {
-      return textResult('Image generation not available: missing GEMINI_BASE_URL or GEMINI_API_KEY.', '')
+    // Call Gemini image generation via LiteLLM proxy (OpenAI-compatible format)
+    const baseUrl = process.env.OPENAI_BASE_URL
+    const apiKey = process.env.OPENAI_API_KEY
+    if (!baseUrl || !apiKey) {
+      return textResult('Image generation not available: missing OPENAI_BASE_URL or OPENAI_API_KEY.', '')
     }
 
-    const apiUrl = `${geminiBaseUrl}/models/${modelId}:generateContent`
+    const apiUrl = `${baseUrl}/chat/completions`
     let response: Response
     try {
       response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': geminiApiKey,
+          'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: params.prompt }] }],
-          generationConfig: {
-            responseModalities: ['TEXT', 'IMAGE'],
-            ...(aspectRatio !== '1:1' ? { aspectRatio } : {}),
-          },
+          model: modelId,
+          messages: [{ role: 'user', content: params.prompt }],
+          // Gemini-specific: request image output via LiteLLM
+          modalities: ['text', 'image'],
+          ...(aspectRatio !== '1:1' ? { aspect_ratio: aspectRatio } : {}),
         }),
       })
     } catch (err: any) {
@@ -243,18 +243,47 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     }
 
     const result = await response.json() as any
-    const parts = result?.candidates?.[0]?.content?.parts ?? []
 
-    // Extract image data
-    const imagePart = parts.find((p: any) => p.inlineData?.data)
-    if (!imagePart) {
-      const textParts = parts.filter((p: any) => p.text).map((p: any) => p.text).join('\n')
-      return textResult(`No image generated. Model response: ${textParts || 'empty'}`, '')
+    // LiteLLM returns Gemini image data in OpenAI-compatible format
+    // Check for inline image data in the response
+    const choices = result?.choices ?? []
+    const message = choices[0]?.message ?? {}
+    const content = message?.content
+
+    // Try to extract image from content parts (LiteLLM multimodal response)
+    let imageData: string | null = null
+    let imageMimeType = 'image/png'
+    let textContent = ''
+
+    if (Array.isArray(content)) {
+      // Multimodal response: [{type: 'text', text: '...'}, {type: 'image_url', image_url: {url: 'data:...'}}]
+      for (const part of content) {
+        if (part.type === 'text') {
+          textContent += part.text
+        } else if (part.type === 'image_url' && part.image_url?.url) {
+          const dataUrl = part.image_url.url
+          const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
+          if (match) {
+            imageMimeType = match[1]
+            imageData = match[2]
+          }
+        }
+      }
+    } else if (typeof content === 'string') {
+      textContent = content
     }
 
-    const mimeType = imagePart.inlineData.mimeType || 'image/png'
-    const ext = mimeType.includes('webp') ? 'webp' : mimeType.includes('jpeg') ? 'jpg' : 'png'
-    const imageBuffer = Buffer.from(imagePart.inlineData.data, 'base64')
+    // Also check tool_calls or function_call patterns from some LiteLLM versions
+    if (!imageData && message?.tool_calls) {
+      textContent = content || ''
+    }
+
+    if (!imageData) {
+      return textResult(`No image generated. Model response: ${textContent || JSON.stringify(result).slice(0, 300)}`, '')
+    }
+
+    const ext = imageMimeType.includes('webp') ? 'webp' : imageMimeType.includes('jpeg') ? 'jpg' : 'png'
+    const imageBuffer = Buffer.from(imageData, 'base64')
 
     // Save to workspace
     const outputFilename = `${filename}.${ext}`

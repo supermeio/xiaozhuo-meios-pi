@@ -250,32 +250,38 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     const message = choices[0]?.message ?? {}
     const content = message?.content
 
-    // Try to extract image from content parts (LiteLLM multimodal response)
+    // Extract image from LiteLLM response — supports multiple formats:
+    // 1. message.images[].image_url.url (LiteLLM Gemini image gen)
+    // 2. content[].image_url.url (OpenAI multimodal)
+    // 3. content[].text (text-only fallback)
     let imageData: string | null = null
     let imageMimeType = 'image/png'
-    let textContent = ''
+    let textContent = typeof content === 'string' ? content : ''
 
-    if (Array.isArray(content)) {
-      // Multimodal response: [{type: 'text', text: '...'}, {type: 'image_url', image_url: {url: 'data:...'}}]
+    // Format 1: LiteLLM puts Gemini images in message.images[]
+    const images = message?.images ?? []
+    if (images.length > 0) {
+      const imgUrl = images[0]?.image_url?.url ?? ''
+      const match = imgUrl.match(/^data:([^;]+);base64,(.+)$/)
+      if (match) {
+        imageMimeType = match[1]
+        imageData = match[2]
+      }
+    }
+
+    // Format 2: OpenAI multimodal content array
+    if (!imageData && Array.isArray(content)) {
       for (const part of content) {
         if (part.type === 'text') {
           textContent += part.text
         } else if (part.type === 'image_url' && part.image_url?.url) {
-          const dataUrl = part.image_url.url
-          const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
+          const match = part.image_url.url.match(/^data:([^;]+);base64,(.+)$/)
           if (match) {
             imageMimeType = match[1]
             imageData = match[2]
           }
         }
       }
-    } else if (typeof content === 'string') {
-      textContent = content
-    }
-
-    // Also check tool_calls or function_call patterns from some LiteLLM versions
-    if (!imageData && message?.tool_calls) {
-      textContent = content || ''
     }
 
     if (!imageData) {

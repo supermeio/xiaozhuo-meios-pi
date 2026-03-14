@@ -337,6 +337,8 @@ async function getOrCreateSession(sessionId?: string) {
 // ── Content block helpers ────────────────────────────────────
 
 const IMAGE_RE = /!\[([^\]]*)\]\(([^)]+\.(png|jpg|jpeg|webp|gif))\)/g
+// Fallback: detect bare file paths like `outfits/foo.png` in text
+const BARE_PATH_RE = /(?:^|[\s`])(((?:outfits|closet|looks)\/[^\s`"'<>]+\.(png|jpg|jpeg|webp|gif)))(?:[\s`]|$)/gm
 
 /**
  * Parse agent text into content blocks. Splits on markdown image
@@ -376,6 +378,42 @@ function textToContentBlocks(text: string): ParsedContentBlock[] {
   // Remaining text after last image
   const remaining = text.slice(lastIndex).trim()
   if (remaining) blocks.push({ type: 'text', text: remaining })
+
+  // If no image blocks found via markdown syntax, try bare file paths
+  const hasImageBlock = blocks.some(b => b.type === 'image')
+  if (!hasImageBlock) {
+    const newBlocks: ParsedContentBlock[] = []
+    const fullText = blocks.map(b => b.text ?? '').join('\n')
+    let bareLastIndex = 0
+    let foundBareImage = false
+
+    for (const match of fullText.matchAll(BARE_PATH_RE)) {
+      const filePath = match[1]
+      const matchIndex = match.index!
+      const absPath = resolve(WORKSPACE, filePath)
+
+      if (existsSync(absPath)) {
+        const before = fullText.slice(bareLastIndex, matchIndex).trim()
+        if (before) newBlocks.push({ type: 'text', text: before })
+
+        const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
+        newBlocks.push({
+          type: 'image',
+          url: `/files/${filePath}`,
+          imageId,
+          alt: filePath.split('/').pop()?.replace(/\.[^.]+$/, '') || undefined,
+        })
+        bareLastIndex = matchIndex + match[0].length
+        foundBareImage = true
+      }
+    }
+
+    if (foundBareImage) {
+      const remaining = fullText.slice(bareLastIndex).trim()
+      if (remaining) newBlocks.push({ type: 'text', text: remaining })
+      return newBlocks
+    }
+  }
 
   // If no blocks were created, return the full text as a single block
   if (blocks.length === 0) blocks.push({ type: 'text', text })

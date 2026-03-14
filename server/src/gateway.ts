@@ -48,7 +48,9 @@ interface AgentEvent {
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '18800')
 const VERSION = '0.1.0'
 const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
-const WORKSPACE = resolve(PROJECT_ROOT, 'workspace')
+const WORKSPACE = process.env.MEIOS_WORKSPACE
+  ? resolve(process.env.MEIOS_WORKSPACE)
+  : resolve(PROJECT_ROOT, 'workspace')
 const AGENT_DIR = resolve(PROJECT_ROOT, '.meios-agent')
 const SESSIONS_DIR = resolve(AGENT_DIR, 'sessions')
 
@@ -224,19 +226,16 @@ function parseJsonlMessages(content: string): ParsedMessage[] {
 
       const blocks = Array.isArray(msg.content) ? msg.content : [msg.content]
 
-      // Build content blocks from raw agent blocks
-      const contentBlocks: ParsedContentBlock[] = []
-      for (const b of blocks) {
-        if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-          contentBlocks.push({ type: 'text', text: b.text })
-        }
-        // Future: handle image blocks from agent here
-      }
+      // Concatenate text blocks from raw agent content
+      const rawText = blocks
+        .filter((b: any) => b.type === 'text' && typeof b.text === 'string' && b.text.trim())
+        .map((b: any) => b.text)
+        .join('\n')
 
-      // Skip empty messages
-      if (contentBlocks.length === 0) continue
+      if (!rawText) continue
 
-      // Backward-compat: concatenate text blocks
+      // Parse through textToContentBlocks to detect image references
+      const contentBlocks = textToContentBlocks(rawText)
       const text = contentBlocks
         .filter(b => b.type === 'text')
         .map(b => b.text)
@@ -344,6 +343,18 @@ const IMAGE_RE = /!\[([^\]]*)\]\(([^)]+\.(png|jpg|jpeg|webp|gif))\)/g
 // Fallback: detect bare file paths like `outfits/foo.png` in text
 const BARE_PATH_RE = /(?:^|[\s`])(((?:workspace\/)?(?:outfits|closet|looks)\/[^\s`"'<>]+\.(png|jpg|jpeg|webp|gif)))(?:[\s`]|$)/gm
 
+/** Reorder blocks so all text comes first, then all images. */
+function reorderTextBeforeImages(blocks: ParsedContentBlock[]): ParsedContentBlock[] {
+  const imageBlocks = blocks.filter(b => b.type === 'image')
+  if (imageBlocks.length === 0) return blocks
+  // Clean up orphaned markdown bold/italic markers left by image extraction
+  const textBlocks = blocks
+    .filter(b => b.type === 'text')
+    .map(b => ({ ...b, text: b.text!.replace(/^\*{1,2}\s*$/gm, '').replace(/^\s*\*{1,2}$/gm, '').trim() }))
+    .filter(b => b.text)
+  return [...textBlocks, ...imageBlocks]
+}
+
 /**
  * Parse agent text into content blocks. Splits on markdown image
  * references, converting them to image blocks and keeping surrounding
@@ -419,14 +430,14 @@ function textToContentBlocks(text: string): ParsedContentBlock[] {
     if (foundBareImage) {
       const remaining = fullText.slice(bareLastIndex).trim()
       if (remaining) newBlocks.push({ type: 'text', text: remaining })
-      return newBlocks
+      return reorderTextBeforeImages(newBlocks)
     }
   }
 
   // If no blocks were created, return the full text as a single block
   if (blocks.length === 0) blocks.push({ type: 'text', text })
 
-  return blocks
+  return reorderTextBeforeImages(blocks)
 }
 
 // ── Chat ────────────────────────────────────────────────────

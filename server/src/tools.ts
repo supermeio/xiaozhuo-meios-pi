@@ -177,20 +177,19 @@ export const suggestOutfitTool: ToolDefinition<typeof SuggestOutfitParams, strin
 //  Tool 5: generate_image — 生成图片
 // ════════════════════════════════════════════
 
-const VALID_ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'] as const
-
 const GenerateImageParams = Type.Object({
   prompt: Type.String({ description: '图片描述，具体描述你想生成的画面内容' }),
   filename: Type.String({ description: '保存文件名（不含扩展名），如 casual-spring-outfit' }),
   subfolder: Type.Optional(Type.String({ description: '保存子目录（相对于 workspace），如 outfits/2026-03-14。默认为 outfits' })),
-  aspectRatio: Type.Optional(Type.String({ description: '宽高比：1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9。默认 3:4（适合服装展示）' })),
-  quality: Type.Optional(Type.String({ description: '质量：standard（快速，默认）或 pro（高质量，较慢）' })),
+  model: Type.Optional(Type.String({ description: '模型：flash（默认，快速）或 pro（高质量，较慢）。不要传此参数，除非用户明确要求 pro' })),
+  aspectRatio: Type.Optional(Type.String({ description: '宽高比。flash 支持：1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9, 1:4, 4:1, 1:8, 8:1。pro 支持：1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9。默认 3:4' })),
+  imageSize: Type.Optional(Type.String({ description: '分辨率。flash 支持：512, 1K, 2K, 4K。pro 支持：1K, 2K, 4K。默认 1K' })),
 })
 
 export const generateImageTool: ToolDefinition<typeof GenerateImageParams, string> = {
   name: 'generate_image',
   label: '生成图片',
-  description: '使用 AI 生成图片。适用于生成穿搭效果图、服装展示图等。图片会保存到 workspace 目录。',
+  description: '使用 AI 生成图片。适用于生成穿搭效果图、服装展示图等。图片会保存到 workspace 目录。默认使用 flash 模型 + 1K 分辨率。仅当用户明确要求时才改 model/imageSize。',
   parameters: GenerateImageParams,
   async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
     console.log('[generate_image] TOOL CALLED with params:', JSON.stringify(params))
@@ -200,9 +199,10 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     }
 
     const subfolder = (params.subfolder as string) || 'outfits'
+    const modelChoice = (params.model as string) || 'flash'
     const aspectRatio = (params.aspectRatio as string) || '3:4'
-    const quality = (params.quality as string) || 'standard'
-    const modelId = quality === 'pro'
+    const imageSize = (params.imageSize as string) || '1K'
+    const modelId = modelChoice === 'pro'
       ? 'gemini-3-pro-image-preview'
       : 'gemini-3.1-flash-image-preview'
 
@@ -210,13 +210,12 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     const outDir = ws(subfolder)
     if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true })
 
-    // Call Gemini image generation via LiteLLM proxy (OpenAI-compatible format)
+    // Call via LiteLLM proxy — imageConfig as top-level param gets passed through to Gemini
     const baseUrl = process.env.OPENAI_BASE_URL
     const apiKey = process.env.OPENAI_API_KEY
     if (!baseUrl || !apiKey) {
       return textResult('Image generation not available: missing OPENAI_BASE_URL or OPENAI_API_KEY.', '')
     }
-
     const apiUrl = `${baseUrl}/chat/completions`
     let response: Response
     try {
@@ -229,9 +228,11 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
         body: JSON.stringify({
           model: modelId,
           messages: [{ role: 'user', content: params.prompt }],
-          // Gemini-specific: request image output via LiteLLM
           modalities: ['text', 'image'],
-          ...(aspectRatio !== '1:1' ? { aspect_ratio: aspectRatio } : {}),
+          imageConfig: {
+            aspectRatio,
+            imageSize,
+          },
         }),
       })
     } catch (err: any) {
@@ -245,35 +246,21 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
 
     const result = await response.json() as any
 
-    // LiteLLM returns Gemini image data in OpenAI-compatible format
-    // Check for inline image data in the response
+    console.log('[generate_image] API response status:', response.status)
+
+    // Extract image from LiteLLM /chat/completions response
+    // Supports: message.content[] with image_url (data URI) and text parts
+    let imageData: string | null = null
+    let imageMimeType = 'image/png'
+    let textContent = ''
+
     const choices = result?.choices ?? []
     const message = choices[0]?.message ?? {}
     const content = message?.content
 
-    console.log('[generate_image] API response status:', response.status)
-
-    // Extract image from LiteLLM response — supports multiple formats:
-    // 1. message.images[].image_url.url (LiteLLM Gemini image gen)
-    // 2. content[].image_url.url (OpenAI multimodal)
-    // 3. content[].text (text-only fallback)
-    let imageData: string | null = null
-    let imageMimeType = 'image/png'
-    let textContent = typeof content === 'string' ? content : ''
-
-    // Format 1: LiteLLM puts Gemini images in message.images[]
-    const images = message?.images ?? []
-    if (images.length > 0) {
-      const imgUrl = images[0]?.image_url?.url ?? ''
-      const match = imgUrl.match(/^data:([^;]+);base64,(.+)$/)
-      if (match) {
-        imageMimeType = match[1]
-        imageData = match[2]
-      }
-    }
-
-    // Format 2: OpenAI multimodal content array
-    if (!imageData && Array.isArray(content)) {
+    if (typeof content === 'string') {
+      textContent = content
+    } else if (Array.isArray(content)) {
       for (const part of content) {
         if (part.type === 'text') {
           textContent += part.text
@@ -287,18 +274,32 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
       }
     }
 
-    console.log('[generate_image] images array length:', images.length, 'imageData found:', !!imageData, 'content type:', typeof content, 'isArray:', Array.isArray(content))
+    // Fallback: LiteLLM may put images in message.images[]
+    if (!imageData) {
+      const images = message?.images ?? []
+      if (images.length > 0) {
+        const imgUrl = images[0]?.image_url?.url ?? ''
+        const match = imgUrl.match(/^data:([^;]+);base64,(.+)$/)
+        if (match) {
+          imageMimeType = match[1]
+          imageData = match[2]
+        }
+      }
+    }
+
+    console.log('[generate_image] imageData found:', !!imageData, 'textContent:', textContent.slice(0, 50))
 
     if (!imageData) {
-      return textResult(`No image generated. Model response: ${textContent || JSON.stringify(result).slice(0, 300)}`, '')
+      return textResult(`No image generated. Response: ${JSON.stringify(result).slice(0, 300)}`, '')
     }
     console.log('[generate_image] image extracted, size:', imageData.length, 'mime:', imageMimeType)
 
     const ext = imageMimeType.includes('webp') ? 'webp' : imageMimeType.includes('jpeg') ? 'jpg' : 'png'
     const imageBuffer = Buffer.from(imageData, 'base64')
 
-    // Save to workspace
-    const outputFilename = `${filename}.${ext}`
+    // Save to workspace — append short timestamp to avoid filename/cache collisions
+    const stamp = Date.now().toString(36)
+    const outputFilename = `${filename}-${stamp}.${ext}`
     const outputPath = join(outDir, outputFilename)
     writeFileSync(outputPath, imageBuffer)
 
@@ -306,7 +307,7 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
     const sizeKb = Math.round(imageBuffer.length / 1024)
     const summary = [
       `已生成图片并保存到 ${relativePath} (${sizeKb}KB)`,
-      `模型: ${modelId}，宽高比: ${aspectRatio}`,
+      `模型: ${modelId}，宽高比: ${aspectRatio}，分辨率: ${imageSize}`,
       textContent ? `描述: ${textContent}` : '',
     ].filter(Boolean).join('\n')
 

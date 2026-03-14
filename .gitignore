@@ -11,3 +11,4 @@ workspace/memory/
 upstream/
 env.cloudrun.yaml
 .temp/
+scripts/dev/

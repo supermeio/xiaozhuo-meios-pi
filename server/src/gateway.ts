@@ -139,7 +139,7 @@ initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Accept',
 } as const
 
 const JSON_HEADERS = {
@@ -341,18 +341,16 @@ async function getOrCreateSession(sessionId?: string) {
 
 const IMAGE_RE = /!\[([^\]]*)\]\(([^)]+\.(png|jpg|jpeg|webp|gif))\)/g
 // Fallback: detect bare file paths like `outfits/foo.png` in text
-const BARE_PATH_RE = /(?:^|[\s`])(((?:workspace\/)?(?:outfits|closet|looks)\/[^\s`"'<>]+\.(png|jpg|jpeg|webp|gif)))(?:[\s`]|$)/gm
+const BARE_PATH_RE = /(?:^|[\s`])(((?:workspace\/)?(?:images|closet|looks)\/[^\s`"'<>]+\.(png|jpg|jpeg|webp|gif)))(?:[\s`]|$)/gm
 
 /** Reorder blocks so all text comes first, then all images. */
-function reorderTextBeforeImages(blocks: ParsedContentBlock[]): ParsedContentBlock[] {
-  const imageBlocks = blocks.filter(b => b.type === 'image')
-  if (imageBlocks.length === 0) return blocks
-  // Clean up orphaned markdown bold/italic markers left by image extraction
-  const textBlocks = blocks
-    .filter(b => b.type === 'text')
-    .map(b => ({ ...b, text: b.text!.replace(/^\*{1,2}\s*$/gm, '').replace(/^\s*\*{1,2}$/gm, '').trim() }))
-    .filter(b => b.text)
-  return [...textBlocks, ...imageBlocks]
+/** Clean up orphaned markdown markers left by image extraction, preserve natural order. */
+function cleanupBlocks(blocks: ParsedContentBlock[]): ParsedContentBlock[] {
+  return blocks
+    .map(b => b.type === 'text'
+      ? { ...b, text: b.text!.replace(/^\*{1,2}\s*$/gm, '').replace(/^\s*\*{1,2}$/gm, '').trim() }
+      : b)
+    .filter(b => b.type !== 'text' || b.text)
 }
 
 /**
@@ -430,14 +428,14 @@ function textToContentBlocks(text: string): ParsedContentBlock[] {
     if (foundBareImage) {
       const remaining = fullText.slice(bareLastIndex).trim()
       if (remaining) newBlocks.push({ type: 'text', text: remaining })
-      return reorderTextBeforeImages(newBlocks)
+      return cleanupBlocks(newBlocks)
     }
   }
 
   // If no blocks were created, return the full text as a single block
   if (blocks.length === 0) blocks.push({ type: 'text', text })
 
-  return reorderTextBeforeImages(blocks)
+  return cleanupBlocks(blocks)
 }
 
 // ── Chat ────────────────────────────────────────────────────
@@ -479,6 +477,110 @@ async function chat(session: any, input: string): Promise<ChatResult> {
 
     session.prompt(input, { systemPrompt, abortSignal: undefined, images: [] })
   })
+}
+
+// ── SSE Streaming Chat ──────────────────────────────────────
+
+function chatStream(session: any, input: string, sessionId: string, res: ServerResponse): void {
+  const systemPrompt = loadSystemPrompt()
+  const textChunks: string[] = []
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    ...CORS_HEADERS,
+  })
+
+  function sendSSE(data: Record<string, unknown>) {
+    res.write(`data: ${JSON.stringify(data)}\n\n`)
+  }
+
+  // Send session ID immediately
+  sendSSE({ type: 'session', sessionId })
+
+  const unsub = session.subscribe((event: AgentEvent) => {
+    if (event.type === 'message_update') {
+      const evt = (event as any).assistantMessageEvent
+      if (evt?.type === 'text_delta' && evt.delta) {
+        textChunks.push(evt.delta)
+        sendSSE({ type: 'text-delta', delta: evt.delta })
+      }
+      // Detect tool call from LLM output
+      if (evt?.type === 'toolcall_end') {
+        const tc = evt.toolCall ?? evt.tool_call
+        if (tc) {
+          sendSSE({
+            type: 'tool-start',
+            toolName: tc.name ?? tc.tool_name ?? '',
+            toolCallId: tc.id ?? tc.tool_call_id ?? '',
+          })
+        }
+      }
+    }
+
+    if (event.type === 'tool_execution_start') {
+      // Already sent tool-start on toolcall_end, skip duplicate
+    }
+
+    if (event.type === 'tool_execution_end') {
+      const toolName = (event as any).toolName
+      const toolCallId = (event as any).toolCallId
+      const isError = (event as any).isError ?? false
+      sendSSE({ type: 'tool-end', toolName, toolCallId, isError })
+
+      // For generate_image: find the just-created image and send it immediately
+      if (toolName === 'generate_image' && !isError) {
+        try {
+          // Scan image directories for the most recently created file
+          const imageDirs = ['images', 'looks']
+          let newestFile: { dir: string, name: string, mtime: number } | null = null
+          for (const dir of imageDirs) {
+            const dirPath = resolve(WORKSPACE, dir)
+            if (!existsSync(dirPath)) continue
+            for (const f of readdirSync(dirPath)) {
+              const mtime = statSync(resolve(dirPath, f)).mtimeMs
+              if (!newestFile || mtime > newestFile.mtime) {
+                newestFile = { dir, name: f, mtime }
+              }
+            }
+          }
+          if (newestFile && Date.now() - newestFile.mtime < 60_000) {
+              const filePath = `${newestFile.dir}/${newestFile.name}`
+              const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
+              sendSSE({
+                type: 'image',
+                url: `/files/${filePath}`,
+                imageId,
+              })
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    if (event.type === 'agent_end') {
+      unsub()
+      let text: string
+      if (textChunks.length > 0) {
+        text = textChunks.join('')
+      } else {
+        text = ((event as any).messages ?? [])
+          .flatMap((m: AgentMessage) => m.content ?? [])
+          .filter((b: ContentBlock) => b.type === 'text')
+          .map((b: ContentBlock) => b.text)
+          .join('') || '[无回复]'
+      }
+      const content = textToContentBlocks(text)
+      sendSSE({ type: 'done', reply: text, content })
+      res.write('data: [DONE]\n\n')
+      res.end()
+    }
+  })
+
+  // Handle client disconnect
+  res.on('close', () => { unsub() })
+
+  session.prompt(input, { systemPrompt, abortSignal: undefined, images: [] })
 }
 
 // ── Route matching ──────────────────────────────────────────
@@ -535,6 +637,14 @@ const server = createServer(async (req, res) => {
         fail(res, err.message, 400)
         return
       }
+
+      // SSE streaming if client requests it
+      const wantsSSE = req.headers.accept?.includes('text/event-stream')
+      if (wantsSSE) {
+        chatStream(session, message, sessionId, res)
+        return
+      }
+
       const result = await chat(session, message)
       ok(res, { reply: result.reply, content: result.content, sessionId })
       return

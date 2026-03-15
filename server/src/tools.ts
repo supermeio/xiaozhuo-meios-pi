@@ -180,7 +180,7 @@ export const suggestOutfitTool: ToolDefinition<typeof SuggestOutfitParams, strin
 const GenerateImageParams = Type.Object({
   prompt: Type.String({ description: '图片描述，具体描述你想生成的画面内容' }),
   filename: Type.String({ description: '保存文件名（不含扩展名），如 casual-spring-outfit' }),
-  subfolder: Type.Optional(Type.String({ description: '保存子目录（相对于 workspace），如 outfits/2026-03-14。默认为 outfits' })),
+  subfolder: Type.Optional(Type.String({ description: '保存子目录（相对于 workspace），如 images/2026-03-14。默认为 images' })),
   model: Type.Optional(Type.String({ description: '模型：flash（默认，快速）或 pro（高质量，较慢）。不要传此参数，除非用户明确要求 pro' })),
   aspectRatio: Type.Optional(Type.String({ description: '宽高比。flash 支持：1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9, 1:4, 4:1, 1:8, 8:1。pro 支持：1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9。默认 3:4' })),
   imageSize: Type.Optional(Type.String({ description: '分辨率。flash 支持：512, 1K, 2K, 4K。pro 支持：1K, 2K, 4K。默认 1K' })),
@@ -198,7 +198,7 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
       return textResult('Invalid filename. Use lowercase letters, numbers, hyphens, and dots only.', '')
     }
 
-    const subfolder = (params.subfolder as string) || 'outfits'
+    const subfolder = (params.subfolder as string) || 'images'
     const modelChoice = (params.model as string) || 'flash'
     const aspectRatio = (params.aspectRatio as string) || '3:4'
     const imageSize = (params.imageSize as string) || '1K'

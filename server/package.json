@@ -17,10 +17,12 @@
     "@mariozechner/pi-ai": "^0.57.1",
     "@mariozechner/pi-coding-agent": "^0.57.1",
     "@sinclair/typebox": "^0.34.0",
+    "better-sqlite3": "^12.8.0",
     "chokidar": "^5.0.0",
     "tsx": "^4.19.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "vitest": "^4.1.0"
   }
 }

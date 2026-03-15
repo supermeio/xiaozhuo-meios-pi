@@ -9,6 +9,12 @@
  *   GET    /sessions/:id/messages → { ok, data: { messages: [{role, text, content}] } }
  *   DELETE /sessions/:id          → { ok, data: null }
  *   GET    /closet                → { ok, data: { items: [...] } }
+ *   GET    /collections           → { ok, data: { collections: [...] } }
+ *   GET    /collections/:id       → { ok, data: { collection, images: [...] } }
+ *   POST   /collections           → { ok, data: { collection } }
+ *   POST   /collections/:id/images → { ok, data: null }
+ *   DELETE /collections/:id/images/:imgId → { ok, data: null }
+ *   DELETE /collections/:id       → { ok, data: null }
  *   GET    /files/*               → binary file from workspace
  *   GET    /cron                  → { ok, data: { tasks: [...] } }
  *
@@ -27,6 +33,18 @@ import { initCron, listTasks } from './cron.js'
 import { initHeartbeat } from './heartbeat.js'
 import { initSync } from './sync.js'
 import { textToContentBlocks, parseJsonlMessages, type ParsedContentBlock, type ParsedMessage } from './parsers.js'
+import {
+  listCollectionsWithCounts,
+  getCollection,
+  createCollection,
+  deleteCollection,
+  listCollectionImages,
+  addToCollection,
+  removeFromCollection,
+  registerImage,
+  getImageByPath,
+  scanAndRegister,
+} from './collections.js'
 
 // ── pi-agent event types ────────────────────────────────────
 
@@ -559,6 +577,93 @@ const server = createServer(async (req, res) => {
         })
 
       ok(res, { items })
+      return
+    }
+
+    // ── GET /collections ──
+    if (url.pathname === '/collections' && method === 'GET') {
+      const collections = listCollectionsWithCounts().map(c => ({
+        id: c.id,
+        name: c.name,
+        description: c.description,
+        coverImageId: c.cover_image_id,
+        imageCount: c.image_count,
+        createdAt: c.created_at,
+        updatedAt: c.updated_at,
+      }))
+      ok(res, { collections })
+      return
+    }
+
+    // ── POST /collections ──
+    if (url.pathname === '/collections' && method === 'POST') {
+      const body = JSON.parse(await readBody(req))
+      const { name, description } = body
+      if (!name || typeof name !== 'string') {
+        fail(res, 'name is required', 400)
+        return
+      }
+      const collection = createCollection(name, description)
+      ok(res, { collection })
+      return
+    }
+
+    // ── GET /collections/:id ──
+    const colMatch = url.pathname.match(/^\/collections\/([^/]+)$/)
+    if (colMatch && method === 'GET') {
+      const col = getCollection(colMatch[1])
+      if (!col) { fail(res, 'collection not found', 404); return }
+
+      const images = listCollectionImages(col.id).map(img => ({
+        id: img.id,
+        path: img.path,
+        filename: img.filename,
+        url: `/files/${img.path}`,
+        sizeBytes: img.size_bytes,
+        createdAt: img.created_at,
+      }))
+      ok(res, { collection: col, images })
+      return
+    }
+
+    // ── DELETE /collections/:id ──
+    if (colMatch && method === 'DELETE') {
+      const deleted = deleteCollection(colMatch[1])
+      if (!deleted) { fail(res, 'collection not found', 404); return }
+      ok(res, null)
+      return
+    }
+
+    // ── POST /collections/:id/images ──
+    const colImgMatch = url.pathname.match(/^\/collections\/([^/]+)\/images$/)
+    if (colImgMatch && method === 'POST') {
+      const body = JSON.parse(await readBody(req))
+      const { imagePath } = body
+      if (!imagePath || typeof imagePath !== 'string') {
+        fail(res, 'imagePath is required', 400)
+        return
+      }
+
+      const col = getCollection(colImgMatch[1])
+      if (!col) { fail(res, 'collection not found', 404); return }
+
+      const absPath = resolve(WORKSPACE, imagePath)
+      if (!existsSync(absPath)) { fail(res, 'image not found', 404); return }
+
+      let img = getImageByPath(imagePath)
+      if (!img) img = registerImage(absPath)
+
+      addToCollection(col.id, img.id)
+      ok(res, null)
+      return
+    }
+
+    // ── DELETE /collections/:id/images/:imgId ──
+    const colImgDelMatch = url.pathname.match(/^\/collections\/([^/]+)\/images\/([^/]+)$/)
+    if (colImgDelMatch && method === 'DELETE') {
+      const [, colId, imgId] = colImgDelMatch
+      removeFromCollection(colId, imgId)
+      ok(res, null)
       return
     }
 

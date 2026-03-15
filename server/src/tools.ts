@@ -3,12 +3,31 @@ import type { AgentToolResult } from '@mariozechner/pi-agent-core'
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { Theme } from '@mariozechner/pi-coding-agent'
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs'
-import { join, basename } from 'node:path'
+import { join, basename, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import {
+  initCollections,
+  registerImage,
+  getImageByPath,
+  listImages,
+  createCollection,
+  getCollection,
+  listCollections,
+  addToCollection,
+  removeFromCollection,
+  listCollectionImages,
+  getImageCollections,
+  listCollectionsWithCounts,
+  deleteCollection,
+  scanAndRegister,
+} from './collections.js'
 
 // ── workspace root (resolved at runtime) ──
 let _workspaceRoot = ''
-export function setWorkspaceRoot(root: string) { _workspaceRoot = root }
+export function setWorkspaceRoot(root: string) {
+  _workspaceRoot = root
+  try { initCollections(root) } catch { /* collections DB init is best-effort */ }
+}
 function ws(...parts: string[]) { return join(_workspaceRoot, ...parts) }
 
 // ── Helper: make AgentToolResult ──
@@ -305,6 +324,12 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
 
     const relativePath = `${subfolder}/${outputFilename}`
     const sizeKb = Math.round(imageBuffer.length / 1024)
+
+    // Auto-register in collections DB
+    try {
+      registerImage(outputPath, { prompt: params.prompt, model: modelId, aspectRatio, imageSize })
+    } catch { /* best-effort */ }
+
     const summary = [
       `已生成图片并保存到 ${relativePath} (${sizeKb}KB)`,
       `模型: ${modelId}，宽高比: ${aspectRatio}，分辨率: ${imageSize}`,
@@ -315,6 +340,128 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
   },
 }
 
+// ════════════════════════════════════════════
+//  Tool 6: create_collection — 创建图片合集
+// ════════════════════════════════════════════
+
+const CreateCollectionParams = Type.Object({
+  name: Type.String({ description: '合集名称，如 "春季穿搭"、"工作 Look"' }),
+  description: Type.Optional(Type.String({ description: '合集描述' })),
+})
+
+export const createCollectionTool: ToolDefinition<typeof CreateCollectionParams, string> = {
+  name: 'create_collection',
+  label: '创建合集',
+  description: '创建一个新的图片合集。合集可以包含多张图片，同一张图片也可以属于多个合集。',
+  parameters: CreateCollectionParams,
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    const col = createCollection(params.name as string, params.description as string | undefined)
+    return textResult(`已创建合集「${col.name}」(ID: ${col.id})`, col.id)
+  },
+}
+
+// ════════════════════════════════════════════
+//  Tool 7: add_to_collection — 添加图片到合集
+// ════════════════════════════════════════════
+
+const AddToCollectionParams = Type.Object({
+  collectionId: Type.String({ description: '合集 ID' }),
+  imagePath: Type.String({ description: '图片的相对路径，如 images/outfit-abc.png' }),
+})
+
+export const addToCollectionTool: ToolDefinition<typeof AddToCollectionParams, string> = {
+  name: 'add_to_collection',
+  label: '添加到合集',
+  description: '将一张图片添加到指定合集。图片路径是相对于 workspace 的路径。如果图片未注册，会自动注册。',
+  parameters: AddToCollectionParams,
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    const imagePath = params.imagePath as string
+    const collectionId = params.collectionId as string
+
+    const absPath = ws(imagePath)
+    if (!existsSync(absPath)) {
+      return textResult(`找不到图片: ${imagePath}`, '')
+    }
+
+    // Auto-register if not in DB
+    let img = getImageByPath(imagePath)
+    if (!img) {
+      img = registerImage(absPath)
+    }
+
+    const col = getCollection(collectionId)
+    if (!col) {
+      return textResult(`找不到合集: ${collectionId}`, '')
+    }
+
+    const added = addToCollection(collectionId, img.id)
+    if (!added) {
+      return textResult(`图片已在合集「${col.name}」中`, '')
+    }
+
+    return textResult(`已将 ${imagePath} 添加到合集「${col.name}」`, img.id)
+  },
+}
+
+// ════════════════════════════════════════════
+//  Tool 8: list_collections — 列出所有合集
+// ════════════════════════════════════════════
+
+const ListCollectionsParams = Type.Object({})
+
+export const listCollectionsTool: ToolDefinition<typeof ListCollectionsParams, string> = {
+  name: 'list_collections',
+  label: '查看合集',
+  description: '列出所有图片合集及其包含的图片数量。',
+  parameters: ListCollectionsParams,
+  async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+    const cols = listCollectionsWithCounts()
+    if (cols.length === 0) {
+      return textResult('还没有创建任何合集。', '')
+    }
+
+    const lines = cols.map(c =>
+      `- ${c.name} (${c.image_count} 张图片) — ID: ${c.id}`
+    )
+    return textResult(`共 ${cols.length} 个合集：\n${lines.join('\n')}`, JSON.stringify(cols))
+  },
+}
+
+// ════════════════════════════════════════════
+//  Tool 9: view_collection — 查看合集内容
+// ════════════════════════════════════════════
+
+const ViewCollectionParams = Type.Object({
+  collectionId: Type.String({ description: '合集 ID' }),
+})
+
+export const viewCollectionTool: ToolDefinition<typeof ViewCollectionParams, string> = {
+  name: 'view_collection',
+  label: '查看合集内容',
+  description: '查看某个合集中的所有图片。',
+  parameters: ViewCollectionParams,
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    const collectionId = params.collectionId as string
+    const col = getCollection(collectionId)
+    if (!col) {
+      return textResult(`找不到合集: ${collectionId}`, '')
+    }
+
+    const images = listCollectionImages(collectionId)
+    if (images.length === 0) {
+      return textResult(`合集「${col.name}」是空的。`, '')
+    }
+
+    const lines = images.map((img, i) =>
+      `${i + 1}. ${img.path} (${Math.round(img.size_bytes / 1024)}KB)`
+    )
+    return textResult(
+      `合集「${col.name}」共 ${images.length} 张图片：\n${lines.join('\n')}`,
+      JSON.stringify(images.map(i => i.path))
+    )
+  },
+}
+
 // ── Export all tools ──
 export const wardrobeTools: ToolDefinition[] = [
   saveClothingTool,
@@ -322,4 +469,8 @@ export const wardrobeTools: ToolDefinition[] = [
   getClothingTool,
   suggestOutfitTool,
   generateImageTool,
+  createCollectionTool,
+  addToCollectionTool,
+  listCollectionsTool,
+  viewCollectionTool,
 ]

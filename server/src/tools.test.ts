@@ -27,8 +27,8 @@ describe('tools', () => {
   })
 
   describe('wardrobeTools export', () => {
-    it('exports all 5 tools', () => {
-      expect(wardrobeTools).toHaveLength(5)
+    it('exports all 9 tools', () => {
+      expect(wardrobeTools).toHaveLength(9)
     })
 
     it('each tool has required fields', () => {
@@ -49,6 +49,10 @@ describe('tools', () => {
         'get_clothing',
         'suggest_outfit',
         'generate_image',
+        'create_collection',
+        'add_to_collection',
+        'list_collections',
+        'view_collection',
       ])
     })
   })

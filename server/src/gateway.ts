@@ -26,6 +26,7 @@ import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 import { initCron, listTasks } from './cron.js'
 import { initHeartbeat } from './heartbeat.js'
 import { initSync } from './sync.js'
+import { textToContentBlocks, parseJsonlMessages, type ParsedContentBlock, type ParsedMessage } from './parsers.js'
 
 // ── pi-agent event types ────────────────────────────────────
 
@@ -177,78 +178,7 @@ function readBody(req: IncomingMessage): Promise<string> {
   })
 }
 
-// ── JSONL parsing ───────────────────────────────────────────
-
-interface ParsedContentBlock {
-  type: 'text' | 'image'
-  text?: string
-  url?: string
-  imageId?: string
-  width?: number
-  height?: number
-  alt?: string
-}
-
-interface ParsedMessage {
-  role: 'user' | 'assistant'
-  text: string
-  content: ParsedContentBlock[]
-}
-
-/**
- * Parse a session JSONL file and extract user/assistant messages.
- *
- * JSONL line format:
- *   {"type":"message","id":"...","message":{"role":"user|assistant","content":[...]}}
- *
- * Content blocks can be:
- *   {"type":"text","text":"..."}       — we keep these
- *   {"type":"thinking","thinking":"..."} — we skip these
- *   {"type":"toolCall",...}             — we skip these
- *   {"type":"toolResult",...}           — we skip these (role === "toolResult")
- */
-function parseJsonlMessages(content: string): ParsedMessage[] {
-  const messages: ParsedMessage[] = []
-  const lines = content.split('\n').filter(Boolean)
-
-  for (const line of lines) {
-    try {
-      const entry = JSON.parse(line)
-
-      // Only process lines with type === "message"
-      if (entry.type !== 'message') continue
-
-      const msg = entry.message
-      if (!msg || !msg.role || !msg.content) continue
-
-      // Only user and assistant messages
-      if (msg.role !== 'user' && msg.role !== 'assistant') continue
-
-      const blocks = Array.isArray(msg.content) ? msg.content : [msg.content]
-
-      // Concatenate text blocks from raw agent content
-      const rawText = blocks
-        .filter((b: any) => b.type === 'text' && typeof b.text === 'string' && b.text.trim())
-        .map((b: any) => b.text)
-        .join('\n')
-
-      if (!rawText) continue
-
-      // Parse through textToContentBlocks to detect image references
-      const contentBlocks = textToContentBlocks(rawText)
-      const text = contentBlocks
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('\n')
-
-      messages.push({ role: msg.role, text, content: contentBlocks })
-    } catch {
-      // Skip malformed lines
-    }
-  }
-
-  return messages
-}
+// ── JSONL parsing (imported from parsers.ts) ────────────────
 
 /**
  * Read all JSONL files in a session directory and parse messages.
@@ -259,7 +189,7 @@ function readSessionMessages(sessDir: string): ParsedMessage[] {
 
   for (const file of files) {
     const content = readFileSync(join(sessDir, file), 'utf-8')
-    allMessages.push(...parseJsonlMessages(content))
+    allMessages.push(...parseJsonlMessages(content, WORKSPACE))
   }
 
   return allMessages
@@ -337,107 +267,6 @@ async function getOrCreateSession(sessionId?: string) {
   return { session, sessionId: id }
 }
 
-// ── Content block helpers ────────────────────────────────────
-
-const IMAGE_RE = /!\[([^\]]*)\]\(([^)]+\.(png|jpg|jpeg|webp|gif))\)/g
-// Fallback: detect bare file paths like `outfits/foo.png` in text
-const BARE_PATH_RE = /(?:^|[\s`])(((?:workspace\/)?(?:images|closet|looks)\/[^\s`"'<>]+\.(png|jpg|jpeg|webp|gif)))(?:[\s`]|$)/gm
-
-/** Reorder blocks so all text comes first, then all images. */
-/** Clean up orphaned markdown markers left by image extraction, preserve natural order. */
-function cleanupBlocks(blocks: ParsedContentBlock[]): ParsedContentBlock[] {
-  return blocks
-    .map(b => b.type === 'text'
-      ? { ...b, text: b.text!.replace(/^\*{1,2}\s*$/gm, '').replace(/^\s*\*{1,2}$/gm, '').trim() }
-      : b)
-    .filter(b => b.type !== 'text' || b.text)
-}
-
-/**
- * Parse agent text into content blocks. Splits on markdown image
- * references, converting them to image blocks and keeping surrounding
- * text as text blocks.
- */
-function textToContentBlocks(text: string): ParsedContentBlock[] {
-  const blocks: ParsedContentBlock[] = []
-  let lastIndex = 0
-
-  for (const match of text.matchAll(IMAGE_RE)) {
-    const [fullMatch, alt, rawFilePath] = match
-    const matchIndex = match.index!
-    // Strip optional workspace/ prefix
-    const filePath = rawFilePath.replace(/^workspace\//, '')
-
-    // Text before this image
-    const before = text.slice(lastIndex, matchIndex).trim()
-    if (before) blocks.push({ type: 'text', text: before })
-
-    // Check if the file actually exists in workspace
-    const absPath = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath)
-    if (existsSync(absPath)) {
-      const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
-      blocks.push({
-        type: 'image',
-        url: `/files/${filePath}`,
-        imageId,
-        alt: alt || undefined,
-      })
-    } else {
-      // File doesn't exist, keep as text
-      blocks.push({ type: 'text', text: fullMatch })
-    }
-
-    lastIndex = matchIndex + fullMatch.length
-  }
-
-  // Remaining text after last image
-  const remaining = text.slice(lastIndex).trim()
-  if (remaining) blocks.push({ type: 'text', text: remaining })
-
-  // If no image blocks found via markdown syntax, try bare file paths
-  const hasImageBlock = blocks.some(b => b.type === 'image')
-  if (!hasImageBlock) {
-    const newBlocks: ParsedContentBlock[] = []
-    const fullText = blocks.map(b => b.text ?? '').join('\n')
-    let bareLastIndex = 0
-    let foundBareImage = false
-
-    for (const match of fullText.matchAll(BARE_PATH_RE)) {
-      // Strip optional workspace/ prefix for file resolution and URL
-      const rawPath = match[1]
-      const filePath = rawPath.replace(/^workspace\//, '')
-      const matchIndex = match.index!
-      const absPath = resolve(WORKSPACE, filePath)
-
-      if (existsSync(absPath)) {
-        const before = fullText.slice(bareLastIndex, matchIndex).trim()
-        if (before) newBlocks.push({ type: 'text', text: before })
-
-        const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
-        newBlocks.push({
-          type: 'image',
-          url: `/files/${filePath}`,
-          imageId,
-          alt: filePath.split('/').pop()?.replace(/\.[^.]+$/, '') || undefined,
-        })
-        bareLastIndex = matchIndex + match[0].length
-        foundBareImage = true
-      }
-    }
-
-    if (foundBareImage) {
-      const remaining = fullText.slice(bareLastIndex).trim()
-      if (remaining) newBlocks.push({ type: 'text', text: remaining })
-      return cleanupBlocks(newBlocks)
-    }
-  }
-
-  // If no blocks were created, return the full text as a single block
-  if (blocks.length === 0) blocks.push({ type: 'text', text })
-
-  return cleanupBlocks(blocks)
-}
-
 // ── Chat ────────────────────────────────────────────────────
 
 interface ChatResult {
@@ -470,7 +299,7 @@ async function chat(session: any, input: string): Promise<ChatResult> {
             .map((b: ContentBlock) => b.text)
             .join('') || '[无回复]'
         }
-        const content = textToContentBlocks(text)
+        const content = textToContentBlocks(text, WORKSPACE)
         resolve({ reply: text, content })
       }
     })
@@ -570,7 +399,7 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
           .map((b: ContentBlock) => b.text)
           .join('') || '[无回复]'
       }
-      const content = textToContentBlocks(text)
+      const content = textToContentBlocks(text, WORKSPACE)
       sendSSE({ type: 'done', reply: text, content })
       res.write('data: [DONE]\n\n')
       res.end()

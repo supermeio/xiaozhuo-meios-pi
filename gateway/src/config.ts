@@ -6,6 +6,7 @@ function required(key: string): string {
 
 export const config = {
   port: parseInt(process.env.PORT ?? '8080'),
+  sandboxProvider: (process.env.SANDBOX_PROVIDER ?? 'daytona') as 'daytona' | 'flyio',
   supabase: {
     url: required('SUPABASE_URL'),
     secretKey: required('SUPABASE_SECRET_KEY'),

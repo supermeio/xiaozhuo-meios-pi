@@ -3,6 +3,7 @@ import { getSandboxByUserId, updateSignedUrl, upsertSandbox, type Sandbox } from
 import { ensureUserPlan } from './billing.js'
 import { config } from './config.js'
 import { log, logError } from './log.js'
+import { createMachine, startMachine, getMachine, checkHealth } from './flyio.js'
 
 const SIGNED_URL_TTL = 86400    // 24 hours
 const REFRESH_BUFFER = 3600     // refresh 1 hour before expiry
@@ -280,5 +281,110 @@ export async function createSshToken(userId: string, expiresInMinutes = 60): Pro
 export async function forceRefreshSignedUrl(userId: string): Promise<string | null> {
   const sandbox = await getSandboxByUserId(userId)
   if (!sandbox) return null
+
+  // Fly.io machines use private IP — no signed URL refresh needed
+  if (config.sandboxProvider === 'flyio') {
+    return sandbox.signed_url
+  }
+
   return await refreshSignedUrl(sandbox)
+}
+
+// ── Fly.io provisioning ──
+
+/**
+ * Provision a new Fly.io Machine for a user.
+ *
+ * 1. Create LiteLLM virtual key (rate limit + budget)
+ * 2. Create Fly Machine with JuiceFS + LLM env vars
+ * 3. Wait for gateway to be healthy
+ * 4. Store sandbox record in DB
+ */
+export async function provisionFlyMachine(userId: string): Promise<{ sandbox: Sandbox; signedUrl: string }> {
+  const port = config.meios.gatewayPort
+  slog(`provisioning Fly.io machine for user ${userId}...`)
+
+  // 1. Create LiteLLM virtual key
+  const { key: virtualKey, keyName } = await createLiteLLMKey(userId)
+  slog('LiteLLM virtual key created', { keyName })
+
+  // 2. Create Fly Machine
+  const proxyUrl = config.meios.llmProxyUrl
+  const { machineId, privateIp } = await createMachine({
+    userId,
+    llmProxyUrl: proxyUrl,
+    virtualKey,
+  })
+
+  slog(`Fly machine created: ${machineId}`, { privateIp })
+
+  // 3. Wait for gateway to be healthy (poll for up to 60s)
+  let healthy = false
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 3000))
+    healthy = await checkHealth(privateIp, port)
+    if (healthy) {
+      slog(`health check passed on attempt ${i + 1}`)
+      break
+    }
+  }
+
+  if (!healthy) {
+    slog('health check did not pass after 20 attempts')
+  }
+
+  // 4. Build sandbox URL — Fly machines are accessed via private IPv6
+  // The gateway proxy will forward requests to this address
+  const sandboxUrl = `http://[${privateIp}]:${port}`
+
+  // 5. Store in DB (reuse Sandbox table — daytona_id stores fly machine ID)
+  const sandbox = await upsertSandbox({
+    user_id: userId,
+    daytona_id: machineId,       // Fly machine ID (reusing daytona_id column)
+    signed_url: sandboxUrl,       // Private IP URL (reusing signed_url column)
+    signed_url_exp: null,         // No expiry for Fly private IPs
+    port,
+    token: keyName,
+    token_expires_at: null,
+    status: 'active',
+  })
+
+  await ensureUserPlan(userId)
+
+  slog(`Fly machine provisioned for user ${userId}: ${machineId}`)
+  return { sandbox, signedUrl: sandboxUrl }
+}
+
+/**
+ * Resolve sandbox URL for a user — works for both Daytona and Fly.io.
+ *
+ * For Fly.io: checks if machine is running, starts it if stopped.
+ * For Daytona: delegates to resolveSignedUrl (existing behavior).
+ */
+export async function resolveSandboxUrl(userId: string): Promise<string | null> {
+  if (config.sandboxProvider !== 'flyio') {
+    return resolveSignedUrl(userId)
+  }
+
+  const sandbox = await getSandboxByUserId(userId)
+  if (!sandbox) return null
+
+  // Check if machine is still running
+  const machine = await getMachine(sandbox.daytona_id)
+  if (!machine) return null
+
+  if (machine.state === 'stopped' || machine.state === 'suspended') {
+    // Start the stopped machine (resume on demand)
+    slog('starting stopped Fly machine', { machineId: sandbox.daytona_id, userId })
+    await startMachine(sandbox.daytona_id)
+
+    // Wait for health
+    const port = sandbox.port ?? config.meios.gatewayPort
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 3000))
+      if (await checkHealth(machine.private_ip, port)) break
+    }
+  }
+
+  return sandbox.signed_url
 }

@@ -34,8 +34,10 @@ vi.mock('./api-keys.js', () => ({
 
 vi.mock('./sandbox.js', () => ({
   resolveSignedUrl: vi.fn(),
+  resolveSandboxUrl: vi.fn(),
   forceRefreshSignedUrl: vi.fn(),
   provisionSandbox: vi.fn(),
+  provisionFlyMachine: vi.fn(),
   createSshToken: vi.fn(),
 }))
 
@@ -44,6 +46,15 @@ vi.mock('./db.js', () => ({
   getSandboxByUserId: vi.fn(),
   upsertSandbox: vi.fn(),
   updateSignedUrl: vi.fn(),
+}))
+
+vi.mock('./flyio.js', () => ({
+  createMachine: vi.fn(),
+  startMachine: vi.fn(),
+  stopMachine: vi.fn(),
+  destroyMachine: vi.fn(),
+  getMachine: vi.fn(),
+  checkHealth: vi.fn(),
 }))
 
 vi.mock('./log.js', () => ({
@@ -56,7 +67,7 @@ vi.mock('./log.js', () => ({
 import { app } from './app.js'
 import { jwtVerify } from 'jose'
 import { lookupByApiKey } from './api-keys.js'
-import { resolveSignedUrl, provisionSandbox, createSshToken } from './sandbox.js'
+import { resolveSandboxUrl, provisionSandbox, provisionFlyMachine, createSshToken, resolveSignedUrl } from './sandbox.js'
 import { getSandboxByUserId } from './db.js'
 
 // Helper: make a request to the Hono app
@@ -304,7 +315,7 @@ describe('Gateway E2E', () => {
   describe('Catch-all proxy', () => {
     it('proxies authenticated requests to sandbox', async () => {
       mockJwtAuth('user-1')
-      ;(resolveSignedUrl as any).mockResolvedValue('https://sandbox.example.com')
+      ;(resolveSandboxUrl as any).mockResolvedValue('https://sandbox.example.com')
 
       // The proxy will call fetch() to forward to sandbox
       // We mock global fetch for this test
@@ -330,8 +341,8 @@ describe('Gateway E2E', () => {
 
     it('returns 503 when sandbox provision fails', async () => {
       mockJwtAuth('user-1')
-      ;(resolveSignedUrl as any).mockResolvedValue(null)
-      ;(provisionSandbox as any).mockRejectedValue(new Error('Daytona API down'))
+      ;(resolveSandboxUrl as any).mockResolvedValue(null)
+      ;(provisionSandbox as any).mockRejectedValue(new Error('Sandbox API down'))
 
       const res = await req('/some-path', {
         headers: { 'Authorization': 'Bearer jwt' },

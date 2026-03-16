@@ -56,13 +56,28 @@ Agent writes → JuiceFS (GCS) → Cloudflare CDN → iOS app reads
 - **Delivery**: Cloudflare CDN reverse-proxies GCS — images are cacheable (immutable, high hit rate)
 - **R2 phase-out**: existing R2 sync can be deprecated once GCS + CDN is live
 
+### Why Fly.io over Daytona
+
+We initially built on Daytona but discovered a blocking limitation during JuiceFS integration:
+- Daytona Tier 1-2 sandboxes have **restricted outbound network** (whitelist only)
+- JuiceFS needs to reach `juicefs.com` (metadata) and `googleapis.com` (GCS data)
+- Both are blocked on Tier 1-2. Tier 3 requires **$500 prepaid spend** to unlock
+
+We evaluated alternatives (E2B, Modal, Cloudflare Containers, Fly.io, Railway) and chose **Fly.io Machines**:
+- **JuiceFS verified working** — community-confirmed, and we validated it ourselves
+- **No network restrictions** on any plan
+- **~300ms cold start** (Firecracker microVMs)
+- **Cheapest option** — pay-per-second, stopped machines cost almost nothing
+- **REST API** for programmatic machine create/start/stop/destroy
+- `/dev/fuse` available — FUSE mounts work out of the box
+
 ### Architecture
 
 ```
 ┌──────────────────────────────────┐
-│      Daytona Sandbox             │
+│      Fly.io Machine (per-user)   │
 │                                  │
-│  /workspace/        (ephemeral)  │  ← agent code, temp files
+│  /app/              (ephemeral)  │  ← agent code (baked into image)
 │  /persistent/       (JuiceFS)    │  ← images, collections.db
 │    ├── .meios/collections.db     │
 │    ├── images/                   │
@@ -93,24 +108,44 @@ For the initial phase, we use JuiceFS hosted cloud service (not self-deployed):
 - **Auth**: JSON key file, set via `GOOGLE_APPLICATION_CREDENTIALS` env var at mount time
 - **JuiceFS token**: stored in `.env.local` as `JUICEFS_ACCESS_KEY`
 
-### Cold Start Flow
+### Cold Start Flow (with custom image)
 
 ```
-1. Sandbox starts                          (~2s, Daytona)
-2. JuiceFS client mounts /persistent/      (<1s, FUSE + metadata connect)
-3. Agent starts, sees all files instantly   (metadata from JuiceFS cloud)
+1. Fly Machine starts                      (~3s, Firecracker microVM)
+2. JuiceFS client mounts /persistent/      (~1s, FUSE + metadata connect)
+3. Agent starts                            (~1s, node --import tsx)
 4. First image access fetches from GCS     (+100-200ms, then cached locally)
 ```
 
-Total perceived cold start: **<3s**, matching current Daytona cold start. No bulk restore needed.
+Total perceived cold start: **~5s** with custom image (curl/fuse/jfsmount pre-installed).
+Without custom image (apt-get on every start): ~27s — not acceptable for production.
 
-### Verification (2026-03-15)
+### Fly.io Configuration
 
-Successfully verified on openclaw-001 (dev VM):
+- **App**: `meios-sandbox-test` (will rename for production)
+- **Region**: `iad` (US East — close to GCS us-east4)
+- **Per-machine**: shared-cpu-1x, 512MB (can scale up)
+- **Fly.io token**: stored in `.env.local` as `FLYIO_API_TOKEN`
+
+### Verification (2026-03-15/16)
+
+**openclaw-001 (dev VM):**
 - JuiceFS client v5.3.2 installed (Linux ARM64)
 - Mounted `meios-persistent` at `/jfs`
 - Write test: `hello.txt` (10 bytes) — confirmed visible in JuiceFS console
-- Read test: content matches — full round-trip through GCS verified
+
+**Daytona sandbox (attempted):**
+- `/dev/fuse` exists, JuiceFS binary installs fine
+- ❌ Blocked by outbound network restrictions (Tier 1) — cannot reach juicefs.com or googleapis.com
+- Would need Tier 3 ($500 prepaid) to unblock
+
+**Fly.io Machine (verified ✅):**
+- Machine created in iad region, node:20-slim base
+- `/dev/fuse` available, JuiceFS v5.3.4 installed and mounted
+- Read `hello.txt` written from openclaw-001 — cross-environment persistence confirmed
+- Wrote `fly-test.txt` — confirmed in JuiceFS console
+- Full cold start (apt + download + mount + read): ~27s
+- Estimated with custom image: ~5s
 
 ## Collections Data Model
 
@@ -187,44 +222,41 @@ DELETE /collections/:id/images/:imgId → remove image from collection
 
 ## Implementation Plan
 
-### Phase 1: JuiceFS Mount (infra) ✅ partially done
+### Phase 1: JuiceFS + GCS (infra) ✅ done
 - ✅ Sign up for JuiceFS cloud service (free tier)
 - ✅ Create filesystem `meios-persistent` with GCS backend (us-east4)
 - ✅ Create GCP service account with Storage Admin role
 - ✅ Verify mount + read/write on openclaw-001
-- Add JuiceFS client to Daytona sandbox image
-- Configure mount at sandbox startup (`/persistent/`)
-- Migrate image directories from `/workspace/` to `/persistent/`
+- ✅ Verify mount + read/write on Fly.io Machine
+- ✅ Cross-environment data sharing confirmed
 
-### Phase 2: Collections (server) ✅ partially done
+### Phase 2: Collections (server) ✅ done
 - ✅ Add `better-sqlite3` dependency to server
-- ✅ Create collections.db schema initialization (`server/src/collections.ts`)
-- ✅ Implement collection CRUD + image registration + scan/reconcile (36 tests passing)
-- Implement collection tool functions for the agent (wrap collections.ts as pi-agent tools)
-- Register image in DB on creation in `generate_image` tool (compute SHA-256)
+- ✅ Create collections.db schema initialization (`server/src/collections.ts`, 36 tests)
+- ✅ Implement collection CRUD + image registration + scan/reconcile
+- ✅ Agent tool functions: create_collection, add_to_collection, list_collections, view_collection
+- ✅ Auto-register images in `generate_image` tool
+- ✅ Gateway API endpoints (6 new endpoints)
+- ✅ Full API validation on openclaw-001
 - Add chokidar watcher to reconcile DB ↔ filesystem
 
-### Phase 3: API & iOS (gateway + client)
-- Add collection endpoints to server gateway
+### Phase 3: Fly.io Migration
+- Build custom Docker image with curl/fuse/jfsmount pre-installed
+- Port sandbox provisioning from Daytona SDK to Fly.io Machines API
+- Configure JuiceFS mount in machine startup script
+- Implement machine lifecycle: create on demand, stop on idle, destroy on archive
+- Update gateway proxy to route to Fly.io machines (replace Daytona signed URLs)
+
+### Phase 4: API & iOS (gateway + client)
 - iOS: collection list view, collection detail view
 - iOS: add-to-collection action from image viewer
 
-### Phase 4: Smart Collections (future)
-- Define filter DSL (JSON-based)
-- Implement query evaluator
-- iOS: smart collection creation UI
-
-### Phase 3: API & iOS (gateway + client)
-- Add collection endpoints to server gateway
-- iOS: collection list view, collection detail view
-- iOS: add-to-collection action from image viewer
-
-### Phase 4: CDN & Image Delivery
+### Phase 5: CDN & Image Delivery
 - Configure Cloudflare CDN reverse proxy for GCS
 - Update iOS app to fetch images from CDN URL
 - Deprecate R2 sync
 
-### Phase 5: Smart Collections (future)
+### Phase 6: Smart Collections (future)
 - Define filter DSL (JSON-based)
 - Implement query evaluator
 - iOS: smart collection creation UI
@@ -234,6 +266,9 @@ DELETE /collections/:id/images/:imgId → remove image from collection
 - [JuiceFS Cloud Service](https://juicefs.com/en/product/cloud-service/)
 - [JuiceFS Docs](https://juicefs.com/docs/cloud/)
 - [JuiceFS + R2 limitations](https://github.com/juicedata/juicefs/issues/2155) — why we chose GCS over R2
-- [Daytona Regions](https://www.daytona.io/docs/en/regions/) — sandbox defaults to us-east
+- [JuiceFS on Fly.io with Tigris](https://www.tigrisdata.com/blog/fly-tigris-juicefs/) — community validation
+- [Fly.io Machines API](https://fly.io/docs/machines/overview/)
+- [Fly.io Pricing](https://fly.io/docs/about/pricing/)
+- [Daytona Network Limits](https://www.daytona.io/docs/en/network-limits/) — why we moved away from Daytona
 - Industry models: Apple Photos, Lightroom, PhotoPrism all use SQLite + join table for collections
 - Existing image support: [docs/image-support.md](image-support.md)

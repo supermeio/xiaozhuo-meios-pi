@@ -1,7 +1,13 @@
 import type { Context } from 'hono'
 import type { AuthUser } from './auth.js'
 import type { Sandbox } from './db.js'
-import { resolveSignedUrl, forceRefreshSignedUrl, provisionSandbox } from './sandbox.js'
+import { config } from './config.js'
+import {
+  resolveSandboxUrl,
+  forceRefreshSignedUrl,
+  provisionSandbox,
+  provisionFlyMachine,
+} from './sandbox.js'
 import { logError } from './log.js'
 
 // In-flight provision locks: prevents duplicate sandbox creation when
@@ -9,34 +15,39 @@ import { logError } from './log.js'
 const provisionLocks = new Map<string, Promise<{ sandbox: Sandbox; signedUrl: string }>>()
 
 /**
- * Proxy an authenticated request to the user's Daytona sandbox.
+ * Proxy an authenticated request to the user's sandbox.
+ *
+ * Works with both Daytona and Fly.io backends, controlled by SANDBOX_PROVIDER env var.
  *
  * Flow:
- *   1. Resolve signed URL for user (auto-provisions if none exists)
+ *   1. Resolve sandbox URL for user (auto-provisions if none exists)
  *   2. Forward request (method, path, headers, body)
- *   3. If 401/403 from sandbox → refresh signed URL → retry once
+ *   3. If 401/403 from sandbox → refresh URL → retry once
  *   4. Return sandbox response (preserves { ok, data, error } envelope)
  */
 export async function proxyToSandbox(c: Context): Promise<Response> {
   const user = c.get('user') as AuthUser
-  let signedUrl = await resolveSignedUrl(user.id)
+  let sandboxUrl = await resolveSandboxUrl(user.id)
 
   // Auto-provision sandbox for new users (with per-user lock to avoid duplicates)
-  if (!signedUrl) {
+  if (!sandboxUrl) {
     try {
       let pending = provisionLocks.get(user.id)
       if (!pending) {
-        pending = provisionSandbox(user.id)
+        // Choose provisioner based on config
+        pending = config.sandboxProvider === 'flyio'
+          ? provisionFlyMachine(user.id)
+          : provisionSandbox(user.id)
         provisionLocks.set(user.id, pending)
         try {
           const result = await pending
-          signedUrl = result.signedUrl
+          sandboxUrl = result.signedUrl
         } finally {
           provisionLocks.delete(user.id)
         }
       } else {
         const result = await pending
-        signedUrl = result.signedUrl
+        sandboxUrl = result.signedUrl
       }
     } catch (err: any) {
       logError('proxy', 'auto-provision failed', err, { userId: user.id })
@@ -47,14 +58,14 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
     }
   }
 
-  // Build target URL: signed base + original path
+  // Build target URL: sandbox base + original path
   const path = c.req.path
-  const targetUrl = signedUrl + path
+  const targetUrl = sandboxUrl + path
 
   // Forward the request
   let response = await forwardRequest(c, targetUrl)
 
-  // If sandbox returned 401/403, try refreshing the signed URL once
+  // If sandbox returned 401/403, try refreshing the URL once
   if (response.status === 401 || response.status === 403) {
     const refreshedUrl = await forceRefreshSignedUrl(user.id)
     if (refreshedUrl) {

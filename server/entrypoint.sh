@@ -24,4 +24,8 @@ fi
 
 # ── Start meios gateway ──
 echo "[entrypoint] starting meios gateway..."
-exec node --import tsx src/gateway.ts
+if [ -f dist/gateway.mjs ]; then
+  exec node dist/gateway.mjs
+else
+  exec node --import tsx src/gateway.ts
+fi

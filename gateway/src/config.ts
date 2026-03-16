@@ -27,6 +27,17 @@ export const config = {
       ?? `${required('SUPABASE_URL')}/functions/v1/llm-proxy`,
     gatewayPort: 18800,
   },
+  // Fly.io sandbox compute (replaces Daytona for production)
+  flyio: {
+    apiToken: process.env.FLYIO_API_TOKEN ?? '',
+    appName: process.env.FLYIO_APP_NAME ?? 'meios-sandbox-test',
+    region: process.env.FLYIO_REGION ?? 'iad',
+    sandboxImage: process.env.FLYIO_SANDBOX_IMAGE
+      ?? 'registry.fly.io/meios-sandbox-test:latest',
+    juicefsToken: process.env.JUICEFS_ACCESS_KEY ?? '',
+    juicefsVolume: process.env.JUICEFS_VOLUME ?? 'meios-persistent',
+    gcsKeyB64: process.env.JUICEFS_GCS_KEY_B64 ?? '',
+  },
   // R2 file sync (optional — sync disabled in sandbox if not configured)
   r2: process.env.R2_ENDPOINT ? {
     endpoint: process.env.R2_ENDPOINT,

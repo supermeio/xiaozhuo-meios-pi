@@ -3,6 +3,9 @@
  *
  * Replaces Daytona SDK for sandbox provisioning. Each user gets a Fly Machine
  * with JuiceFS-backed persistent storage.
+ *
+ * Machines are accessed via Fly Proxy (public URL + fly-force-instance-id header)
+ * rather than private IPv6, so the outer gateway can run on any cloud.
  */
 
 import { config } from './config.js'
@@ -18,6 +21,11 @@ interface FlyMachineConfig {
   guest: { cpus: number; memory_mb: number }
   restart: { policy: string }
   auto_destroy: boolean
+  services?: Array<{
+    ports: Array<{ port: number; handlers: string[] }>
+    protocol: string
+    internal_port: number
+  }>
 }
 
 interface FlyMachine {
@@ -81,11 +89,10 @@ export interface CreateMachineOptions {
 
 /**
  * Create and start a new Fly Machine for a user.
- * Returns the machine ID and private IP.
+ * Exposes port 18800 via Fly Proxy for external access.
  */
 export async function createMachine(opts: CreateMachineOptions): Promise<{
   machineId: string
-  privateIp: string
 }> {
   const region = opts.region ?? config.flyio.region
 
@@ -98,6 +105,8 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
       env: {
         // User identity
         MEIOS_USER_ID: opts.userId,
+        // Gateway secret — sandbox checks this on every request
+        GATEWAY_SECRET: config.flyio.gatewaySecret,
         // LLM proxy (all providers via LiteLLM)
         OPENAI_BASE_URL: opts.llmProxyUrl,
         OPENAI_API_KEY: opts.virtualKey,
@@ -114,10 +123,20 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
         JUICEFS_VOLUME: config.flyio.juicefsVolume,
       },
       guest: {
+        cpu_kind: 'shared',
         cpus: 1,
         memory_mb: 512,
       },
-      restart: { policy: 'on-fail' },
+      // Expose port 18800 via Fly Proxy (public HTTPS on fly.dev)
+      services: [{
+        ports: [
+          { port: 443, handlers: ['tls', 'http'] },
+          { port: 80, handlers: ['http'] },
+        ],
+        protocol: 'tcp',
+        internal_port: 18800,
+      }],
+      restart: { policy: 'on-failure' },
       auto_destroy: false,
     },
   }, 60000)
@@ -127,10 +146,7 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
   // Wait for machine to be in started state
   await waitForState(machine.id, 'started', 30000)
 
-  return {
-    machineId: machine.id,
-    privateIp: machine.private_ip,
-  }
+  return { machineId: machine.id }
 }
 
 /**
@@ -176,7 +192,6 @@ export async function getMachine(machineId: string): Promise<FlyMachine | null> 
  * Wait for a machine to reach a target state.
  */
 async function waitForState(machineId: string, state: string, timeoutMs: number): Promise<void> {
-  // Fly Machines API has a wait endpoint
   try {
     await flyApi('GET', `/machines/${machineId}/wait?state=${state}&timeout=${Math.floor(timeoutMs / 1000)}`, undefined, timeoutMs + 5000)
   } catch (err: any) {
@@ -186,12 +201,23 @@ async function waitForState(machineId: string, state: string, timeoutMs: number)
 }
 
 /**
- * Check if a machine's gateway is healthy.
- * Uses Fly's internal DNS (machineId.vm.appName.internal) for direct access.
+ * Build the Fly Proxy URL for reaching a specific machine.
+ * Uses fly-force-instance-id header for routing.
  */
-export async function checkHealth(privateIp: string, port = 18800): Promise<boolean> {
+export function flyProxyUrl(): string {
+  return `https://${config.flyio.appName}.fly.dev`
+}
+
+/**
+ * Check if a machine's gateway is healthy via Fly Proxy.
+ */
+export async function checkHealth(machineId: string, port = 18800): Promise<boolean> {
   try {
-    const res = await fetch(`http://[${privateIp}]:${port}/health`, {
+    const res = await fetch(`${flyProxyUrl()}/health`, {
+      headers: {
+        'fly-force-instance-id': machineId,
+        'X-Gateway-Secret': config.flyio.gatewaySecret,
+      },
       signal: AbortSignal.timeout(5000),
     })
     if (!res.ok) return false

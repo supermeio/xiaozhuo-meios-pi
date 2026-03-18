@@ -35,9 +35,10 @@ export const config = {
     region: process.env.FLYIO_REGION ?? 'iad',
     sandboxImage: process.env.FLYIO_SANDBOX_IMAGE
       ?? 'registry.fly.io/meios-sandbox-test:latest',
-    juicefsToken: process.env.JUICEFS_ACCESS_KEY ?? '',
+    juicefsToken: (process.env.JUICEFS_ACCESS_KEY ?? '').trim(),
     juicefsVolume: process.env.JUICEFS_VOLUME ?? 'meios-persistent',
-    gcsKeyB64: process.env.JUICEFS_GCS_KEY_B64 ?? '',
+    gcsKeyB64: (process.env.JUICEFS_GCS_KEY_B64 ?? '').trim(),
+    gatewaySecret: process.env.GATEWAY_SECRET ?? '',
   },
   // R2 file sync (optional — sync disabled in sandbox if not configured)
   r2: process.env.R2_ENDPOINT ? {

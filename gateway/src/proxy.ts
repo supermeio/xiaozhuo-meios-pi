@@ -22,32 +22,41 @@ const provisionLocks = new Map<string, Promise<{ sandbox: Sandbox; signedUrl: st
  * Flow:
  *   1. Resolve sandbox URL for user (auto-provisions if none exists)
  *   2. Forward request (method, path, headers, body)
- *   3. If 401/403 from sandbox → refresh URL → retry once
+ *   3. If 401/403 from sandbox → refresh URL → retry once (Daytona only)
  *   4. Return sandbox response (preserves { ok, data, error } envelope)
  */
 export async function proxyToSandbox(c: Context): Promise<Response> {
   const user = c.get('user') as AuthUser
-  let sandboxUrl = await resolveSandboxUrl(user.id)
+  let resolved = await resolveSandboxUrl(user.id)
 
   // Auto-provision sandbox for new users (with per-user lock to avoid duplicates)
-  if (!sandboxUrl) {
+  if (!resolved) {
     try {
       let pending = provisionLocks.get(user.id)
       if (!pending) {
-        // Choose provisioner based on config
         pending = config.sandboxProvider === 'flyio'
           ? provisionFlyMachine(user.id)
           : provisionSandbox(user.id)
         provisionLocks.set(user.id, pending)
         try {
           const result = await pending
-          sandboxUrl = result.signedUrl
+          resolved = {
+            url: result.signedUrl,
+            machineId: config.sandboxProvider === 'flyio'
+              ? result.sandbox.daytona_id
+              : undefined,
+          }
         } finally {
           provisionLocks.delete(user.id)
         }
       } else {
         const result = await pending
-        sandboxUrl = result.signedUrl
+        resolved = {
+          url: result.signedUrl,
+          machineId: config.sandboxProvider === 'flyio'
+            ? result.sandbox.daytona_id
+            : undefined,
+        }
       }
     } catch (err: any) {
       logError('proxy', 'auto-provision failed', err, { userId: user.id })
@@ -60,31 +69,41 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
 
   // Build target URL: sandbox base + original path
   const path = c.req.path
-  const targetUrl = sandboxUrl + path
+  const targetUrl = resolved.url + path
 
   // Forward the request
-  let response = await forwardRequest(c, targetUrl)
+  let response = await forwardRequest(c, targetUrl, resolved.machineId)
 
-  // If sandbox returned 401/403, try refreshing the URL once
+  // If sandbox returned 401/403, try refreshing the URL once (Daytona only)
   if (response.status === 401 || response.status === 403) {
     const refreshedUrl = await forceRefreshSignedUrl(user.id)
     if (refreshedUrl) {
       const retryUrl = refreshedUrl + path
-      response = await forwardRequest(c, retryUrl)
+      response = await forwardRequest(c, retryUrl, resolved.machineId)
     }
   }
 
   return response
 }
 
-async function forwardRequest(c: Context, targetUrl: string): Promise<Response> {
+async function forwardRequest(c: Context, targetUrl: string, machineId?: string): Promise<Response> {
   const method = c.req.method
   const headers = new Headers()
 
-  // Forward content-type for POST/PUT/PATCH
+  // Forward content-type and accept headers
   const contentType = c.req.header('Content-Type')
   if (contentType) {
     headers.set('Content-Type', contentType)
+  }
+  const accept = c.req.header('Accept')
+  if (accept) {
+    headers.set('Accept', accept)
+  }
+
+  // Fly.io routing: force request to specific machine + auth secret
+  if (machineId) {
+    headers.set('fly-force-instance-id', machineId)
+    headers.set('X-Gateway-Secret', config.flyio.gatewaySecret)
   }
 
   const init: RequestInit = { method, headers }
@@ -101,8 +120,42 @@ async function forwardRequest(c: Context, targetUrl: string): Promise<Response> 
   try {
     const upstream = await fetch(targetUrl, init)
 
-    // Pass through the response as-is (binary-safe for images, etc.)
     const contentType = upstream.headers.get('Content-Type') ?? 'application/json'
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    }
+
+    // SSE: pipe through with explicit chunk flushing to avoid Cloud Run buffering
+    if (contentType.includes('text/event-stream') && upstream.body) {
+      const reader = upstream.body.getReader()
+      const stream = new ReadableStream({
+        async pull(controller) {
+          const { done, value } = await reader.read()
+          if (done) {
+            controller.close()
+            return
+          }
+          controller.enqueue(value)
+        },
+        cancel() {
+          reader.cancel()
+        },
+      })
+
+      return new Response(stream, {
+        status: upstream.status,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'X-Accel-Buffering': 'no',
+          ...corsHeaders,
+        },
+      })
+    }
+
+    // Binary or text: buffer and forward
     const body = contentType.startsWith('image/') || contentType === 'application/octet-stream'
       ? await upstream.arrayBuffer()
       : await upstream.text()
@@ -112,9 +165,7 @@ async function forwardRequest(c: Context, targetUrl: string): Promise<Response> 
       headers: {
         'Content-Type': contentType,
         'Cache-Control': upstream.headers.get('Cache-Control') ?? '',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        ...corsHeaders,
       },
     })
   } catch (err: any) {

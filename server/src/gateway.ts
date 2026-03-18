@@ -158,8 +158,29 @@ initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Accept',
+  'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization, X-Gateway-Secret',
 } as const
+
+// ── Auth: gateway secret or user JWT ────────────────────────
+const GATEWAY_SECRET = process.env.GATEWAY_SECRET ?? ''
+const MEIOS_USER_ID = process.env.MEIOS_USER_ID ?? ''
+
+function checkAuth(req: IncomingMessage): boolean {
+  // Skip auth if no secret configured (dev mode)
+  if (!GATEWAY_SECRET) return true
+
+  // Check X-Gateway-Secret header (from outer gateway)
+  const secret = req.headers['x-gateway-secret']
+  if (secret === GATEWAY_SECRET) return true
+
+  // Check Authorization: Bearer <token> (from user tools)
+  // For now, accept any bearer token that matches the gateway secret
+  // TODO: upgrade to JWT validation with user ownership check
+  const auth = req.headers['authorization']
+  if (auth?.startsWith('Bearer ') && auth.slice(7) === GATEWAY_SECRET) return true
+
+  return false
+}
 
 const JSON_HEADERS = {
   'Content-Type': 'application/json',
@@ -446,6 +467,12 @@ const server = createServer(async (req, res) => {
   }
 
   try {
+    // ── Auth check (skip /health for Fly Proxy health checks) ──
+    if (url.pathname !== '/health' && !checkAuth(req)) {
+      fail(res, 'Unauthorized', 401)
+      return
+    }
+
     // ── GET /health ──
     if (url.pathname === '/health' && method === 'GET') {
       ok(res, {

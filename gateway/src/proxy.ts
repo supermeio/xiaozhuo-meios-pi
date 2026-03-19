@@ -135,17 +135,20 @@ async function forwardRequest(c: Context, targetUrl: string, machineId?: string)
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     }
 
-    // SSE: pipe through with explicit chunk flushing to avoid Cloud Run buffering
+    // SSE: pipe upstream → client using start() for eager push
     if (contentType.includes('text/event-stream') && upstream.body) {
       const reader = upstream.body.getReader()
       const stream = new ReadableStream({
-        async pull(controller) {
-          const { done, value } = await reader.read()
-          if (done) {
+        async start(controller) {
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) { controller.close(); break }
+              controller.enqueue(value)
+            }
+          } catch {
             controller.close()
-            return
           }
-          controller.enqueue(value)
         },
         cancel() {
           reader.cancel()
@@ -157,7 +160,6 @@ async function forwardRequest(c: Context, targetUrl: string, machineId?: string)
         headers: {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
-          'X-Accel-Buffering': 'no',
           ...corsHeaders,
         },
       })

@@ -21,6 +21,28 @@ app.get('/ping', (c) => {
   return c.json({ ok: true, data: { version: '0.1.0' } })
 })
 
+// SSE test endpoint — verifies streaming works through domain mapping
+app.get('/sse-test', (c) => {
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder()
+      for (let i = 1; i <= 5; i++) {
+        controller.enqueue(encoder.encode(`data: {"n":${i}}\n\n`))
+        await new Promise(r => setTimeout(r, 500))
+      }
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+      controller.close()
+    },
+  })
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'X-Accel-Buffering': 'no',
+    },
+  })
+})
+
 // ── LLM proxy (LiteLLM virtual key auth, not JWT) ──
 // All routes relay to LiteLLM which handles auth, rate limiting, budget, routing.
 

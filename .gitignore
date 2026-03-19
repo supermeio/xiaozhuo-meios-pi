@@ -12,3 +12,5 @@ upstream/
 env.cloudrun.yaml
 .temp/
 scripts/dev/
+.wrangler/
+workspace/.meios/

@@ -8,7 +8,7 @@ import {
   provisionSandbox,
   provisionFlyMachine,
 } from './sandbox.js'
-import { logError } from './log.js'
+import { log, logError } from './log.js'
 
 // In-flight provision locks: prevents duplicate sandbox creation when
 // concurrent requests arrive for the same user before a sandbox exists.
@@ -25,9 +25,15 @@ const provisionLocks = new Map<string, Promise<{ sandbox: Sandbox; signedUrl: st
  *   3. If 401/403 from sandbox → refresh URL → retry once (Daytona only)
  *   4. Return sandbox response (preserves { ok, data, error } envelope)
  */
+function plog(msg: string, data?: Record<string, unknown>) { log('proxy', msg, data) }
+
 export async function proxyToSandbox(c: Context): Promise<Response> {
+  const t0 = Date.now()
   const user = c.get('user') as AuthUser
+  const path = c.req.path
+  plog('request start', { path, userId: user.id })
   let resolved = await resolveSandboxUrl(user.id)
+  plog('resolve done', { path, resolved: !!resolved, ms: Date.now() - t0 })
 
   // Auto-provision sandbox for new users (with per-user lock to avoid duplicates)
   if (!resolved) {
@@ -68,11 +74,13 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
   }
 
   // Build target URL: sandbox base + original path
-  const path = c.req.path
   const targetUrl = resolved.url + path
 
   // Forward the request
+  const t1 = Date.now()
+  plog('forwarding', { targetUrl, machineId: resolved.machineId })
   let response = await forwardRequest(c, targetUrl, resolved.machineId)
+  plog('forward done', { path, status: response.status, ms: Date.now() - t1, totalMs: Date.now() - t0 })
 
   // If sandbox returned 401/403, try refreshing the URL once (Daytona only)
   if (response.status === 401 || response.status === 403) {

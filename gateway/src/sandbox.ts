@@ -312,24 +312,39 @@ export async function resolveSandboxUrl(userId: string): Promise<{ url: string; 
     return url ? { url } : null
   }
 
+  const t0 = Date.now()
   const sandbox = await getSandboxByUserId(userId)
   if (!sandbox) return null
+  slog('resolve: db lookup', { machineId: sandbox.daytona_id, ms: Date.now() - t0 })
 
   // Check if machine is still running
+  const t1 = Date.now()
   const machine = await getMachine(sandbox.daytona_id)
-  if (!machine) return null
+  if (!machine) {
+    slog('resolve: machine not found', { machineId: sandbox.daytona_id, ms: Date.now() - t1 })
+    return null
+  }
+  slog('resolve: getMachine', { machineId: sandbox.daytona_id, state: machine.state, ms: Date.now() - t1 })
 
   if (machine.state === 'stopped' || machine.state === 'suspended') {
-    slog('starting stopped Fly machine', { machineId: sandbox.daytona_id, userId })
+    slog('starting stopped Fly machine', { machineId: sandbox.daytona_id, state: machine.state, userId })
+    const t2 = Date.now()
     await startMachine(sandbox.daytona_id)
+    slog('resolve: startMachine done', { ms: Date.now() - t2 })
 
     // Wait for health via Fly Proxy
     const port = sandbox.port ?? config.meios.gatewayPort
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 3000))
-      if (await checkHealth(sandbox.daytona_id, port)) break
+      const healthy = await checkHealth(sandbox.daytona_id, port)
+      if (healthy) {
+        slog('resolve: health check passed', { attempt: i + 1, totalMs: Date.now() - t0 })
+        break
+      }
+      if (i === 19) slog('resolve: health check failed after 20 attempts', { totalMs: Date.now() - t0 })
     }
   }
 
+  slog('resolve: done', { machineId: sandbox.daytona_id, state: machine.state, totalMs: Date.now() - t0 })
   return { url: flyProxyUrl(), machineId: sandbox.daytona_id }
 }

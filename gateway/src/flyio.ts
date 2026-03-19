@@ -125,7 +125,7 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
       guest: {
         cpu_kind: 'shared',
         cpus: 1,
-        memory_mb: 512,
+        memory_mb: 1024,
       },
       // Expose port 18800 via Fly Proxy (public HTTPS on fly.dev)
       services: [{

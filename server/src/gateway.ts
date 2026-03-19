@@ -315,8 +315,9 @@ interface ChatResult {
 
 async function chat(session: any, input: string): Promise<ChatResult> {
   const systemPrompt = loadSystemPrompt()
+  const abortController = new AbortController()
 
-  return new Promise<ChatResult>((resolve) => {
+  return new Promise<ChatResult>((resolve, reject) => {
     const textChunks: string[] = []
 
     const unsub = session.subscribe((event: AgentEvent) => {
@@ -343,7 +344,7 @@ async function chat(session: any, input: string): Promise<ChatResult> {
       }
     })
 
-    session.prompt(input, { systemPrompt, abortSignal: undefined, images: [] })
+    session.prompt(input, { systemPrompt, abortSignal: abortController.signal, images: [] })
   })
 }
 
@@ -445,10 +446,15 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
     }
   })
 
-  // Handle client disconnect
-  res.on('close', () => { unsub() })
+  // Handle client disconnect — abort the agent so isStreaming resets
+  const abortController = new AbortController()
+  res.on('close', () => {
+    unsub()
+    abortController.abort()
+    session.abort().catch(() => {})
+  })
 
-  session.prompt(input, { systemPrompt, abortSignal: undefined, images: [] })
+  session.prompt(input, { systemPrompt, abortSignal: abortController.signal, images: [] })
 }
 
 // ── Route matching ──────────────────────────────────────────

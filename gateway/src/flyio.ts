@@ -25,6 +25,9 @@ interface FlyMachineConfig {
     ports: Array<{ port: number; handlers: string[] }>
     protocol: string
     internal_port: number
+    auto_stop_machines?: string
+    auto_start_machines?: boolean
+    min_machines_running?: number
   }>
 }
 
@@ -143,6 +146,9 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
         ],
         protocol: 'tcp',
         internal_port: 18800,
+        auto_stop_machines: 'stop',    // Stop machine when idle (no traffic)
+        auto_start_machines: true,      // Fly Proxy auto-starts on new traffic
+        min_machines_running: 0,
       }],
       restart: { policy: 'on-failure' },
       auto_destroy: false,

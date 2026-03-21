@@ -7,6 +7,7 @@
 
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { getImageUrl } from './sync.js'
 
 // ── Types ──
 
@@ -24,6 +25,18 @@ export interface ParsedMessage {
   role: 'user' | 'assistant'
   text: string
   content: ParsedContentBlock[]
+}
+
+// ── CDN URL helper ──
+
+/** Get CDN URL for an image, falling back to /files/ when R2 is not configured. */
+function imageUrl(filePath: string): string {
+  const userId = process.env.MEIOS_USER_ID
+  if (userId) {
+    const r2Url = getImageUrl(userId, filePath)
+    if (r2Url) return r2Url
+  }
+  return `/files/${filePath}`
 }
 
 // ── Regex patterns ──
@@ -67,7 +80,7 @@ export function textToContentBlocks(text: string, workspaceRoot: string): Parsed
       const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
       blocks.push({
         type: 'image',
-        url: `/files/${filePath}`,
+        url: imageUrl(filePath),
         imageId,
         alt: alt || undefined,
       })
@@ -102,7 +115,7 @@ export function textToContentBlocks(text: string, workspaceRoot: string): Parsed
         const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
         newBlocks.push({
           type: 'image',
-          url: `/files/${filePath}`,
+          url: imageUrl(filePath),
           imageId,
           alt: filePath.split('/').pop()?.replace(/\.[^.]+$/, '') || undefined,
         })

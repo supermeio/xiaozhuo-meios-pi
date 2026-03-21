@@ -31,7 +31,7 @@ import { resolve, join } from 'node:path'
 import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 import { initCron, listTasks } from './cron.js'
 import { initHeartbeat } from './heartbeat.js'
-import { initSync } from './sync.js'
+import { initSync, getImageUrl } from './sync.js'
 import { textToContentBlocks, parseJsonlMessages, type ParsedContentBlock, type ParsedMessage } from './parsers.js'
 import {
   listCollectionsWithCounts,
@@ -165,6 +165,15 @@ const CORS_HEADERS = {
 // ── Auth: gateway secret or user JWT ────────────────────────
 const GATEWAY_SECRET = process.env.GATEWAY_SECRET ?? ''
 const MEIOS_USER_ID = process.env.MEIOS_USER_ID ?? ''
+
+/** Get CDN URL for an image path, falling back to /files/ for dev mode. */
+function cdnUrl(filePath: string): string {
+  if (MEIOS_USER_ID) {
+    const r2Url = getImageUrl(MEIOS_USER_ID, filePath)
+    if (r2Url) return r2Url
+  }
+  return `/files/${filePath}`
+}
 
 function checkAuth(req: IncomingMessage): boolean {
   // Skip auth if no secret configured (dev mode)
@@ -420,7 +429,7 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
               const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
               sendSSE({
                 type: 'image',
-                url: `/files/${filePath}`,
+                url: cdnUrl(filePath),
                 imageId,
               })
           }
@@ -678,7 +687,7 @@ const server = createServer(async (req, res) => {
         id: img.id,
         path: img.path,
         filename: img.filename,
-        url: `/files/${img.path}`,
+        url: cdnUrl(img.path),
         sizeBytes: img.size_bytes,
         createdAt: img.created_at,
       }))

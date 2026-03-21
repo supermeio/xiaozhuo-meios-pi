@@ -238,7 +238,7 @@ export async function initSync(workspacePath: string): Promise<{ stop: () => voi
     endpoint,
     accessKeyId,
     secretAccessKey,
-    watchDirs: ['closet', 'images'],
+    watchDirs: ['closet', 'images', 'looks'],
     extensions: DEFAULT_EXTENSIONS,
   }
 

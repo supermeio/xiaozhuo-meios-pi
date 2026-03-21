@@ -44,6 +44,7 @@ import {
   registerImage,
   getImageByPath,
   scanAndRegister,
+  listImages,
 } from './collections.js'
 
 // ── pi-agent event types ────────────────────────────────────
@@ -613,17 +614,43 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    // ── GET /images ──
+    if (url.pathname === '/images' && method === 'GET') {
+      const images = listImages().map(img => ({
+        id: img.id,
+        path: img.path,
+        filename: img.filename,
+        url: `/files/${img.path}`,
+        sizeBytes: img.size_bytes,
+        createdAt: img.created_at,
+      }))
+      ok(res, { images })
+      return
+    }
+
     // ── GET /collections ──
     if (url.pathname === '/collections' && method === 'GET') {
-      const collections = listCollectionsWithCounts().map(c => ({
-        id: c.id,
-        name: c.name,
-        description: c.description,
-        coverImageId: c.cover_image_id,
-        imageCount: c.image_count,
-        createdAt: c.created_at,
-        updatedAt: c.updated_at,
-      }))
+      const collections = listCollectionsWithCounts().map(c => {
+        // Resolve cover image URL: use explicit cover or latest image in collection
+        let coverUrl: string | null = null
+        if (c.cover_image_id) {
+          const coverImg = listCollectionImages(c.id).find(i => i.id === c.cover_image_id)
+          if (coverImg) coverUrl = `/files/${coverImg.path}`
+        }
+        if (!coverUrl && c.image_count > 0) {
+          const imgs = listCollectionImages(c.id)
+          if (imgs.length > 0) coverUrl = `/files/${imgs[0].path}`
+        }
+        return {
+          id: c.id,
+          name: c.name,
+          description: c.description,
+          coverUrl,
+          imageCount: c.image_count,
+          createdAt: c.created_at,
+          updatedAt: c.updated_at,
+        }
+      })
       ok(res, { collections })
       return
     }

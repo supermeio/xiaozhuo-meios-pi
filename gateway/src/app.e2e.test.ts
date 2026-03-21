@@ -15,8 +15,17 @@ vi.mock('./config.js', () => ({
       secretKey: 'test-secret',
       jwksUrl: 'https://test.supabase.co/auth/v1/.well-known/jwks.json',
     },
-    daytona: { apiKey: 'test-daytona', apiUrl: 'https://app.daytona.io' },
     litellm: { proxyUrl: 'http://localhost:4000', masterKey: 'test-master' },
+    flyio: {
+      apiToken: 'test-flyio-token',
+      appName: 'meios-sandbox-test',
+      region: 'iad',
+      sandboxImage: 'registry.fly.io/meios-sandbox-test:latest',
+      juicefsToken: '',
+      juicefsVolume: 'meios-persistent',
+      gcsKeyB64: '',
+      gatewaySecret: 'test-gateway-secret',
+    },
     meios: {
       repoUrl: 'https://github.com/test/repo.git',
       llmProxyUrl: 'https://test.supabase.co/functions/v1/llm-proxy',
@@ -33,12 +42,9 @@ vi.mock('./api-keys.js', () => ({
 }))
 
 vi.mock('./sandbox.js', () => ({
-  resolveSignedUrl: vi.fn(),
   resolveSandboxUrl: vi.fn(),
   forceRefreshSignedUrl: vi.fn(),
-  provisionSandbox: vi.fn(),
   provisionFlyMachine: vi.fn(),
-  createSshToken: vi.fn(),
 }))
 
 vi.mock('./db.js', () => ({
@@ -67,7 +73,7 @@ vi.mock('./log.js', () => ({
 import { app } from './app.js'
 import { jwtVerify } from 'jose'
 import { lookupByApiKey } from './api-keys.js'
-import { resolveSandboxUrl, provisionSandbox, provisionFlyMachine, createSshToken, resolveSignedUrl } from './sandbox.js'
+import { resolveSandboxUrl, provisionFlyMachine } from './sandbox.js'
 import { getSandboxByUserId } from './db.js'
 
 // Helper: make a request to the Hono app
@@ -234,10 +240,10 @@ describe('Gateway E2E', () => {
   describe('Sandbox endpoints', () => {
     it('GET /api/v1/sandbox/url returns sandbox URL', async () => {
       mockJwtAuth('user-1')
-      ;(resolveSignedUrl as any).mockResolvedValue('https://sandbox.example.com/signed')
+      ;(resolveSandboxUrl as any).mockResolvedValue({ url: 'https://meios-sandbox-test.fly.dev', machineId: 'machine-1' })
       ;(getSandboxByUserId as any).mockResolvedValue({
         port: 18800,
-        signed_url_exp: '2026-04-01T00:00:00Z',
+        signed_url_exp: null,
       })
 
       const res = await req('/api/v1/sandbox/url', {
@@ -246,21 +252,21 @@ describe('Gateway E2E', () => {
       expect(res.status).toBe(200)
       const body = await res.json()
       expect(body.ok).toBe(true)
-      expect(body.data.url).toBe('https://sandbox.example.com/signed')
+      expect(body.data.url).toBe('https://meios-sandbox-test.fly.dev')
       expect(body.data.endpoints).toHaveProperty('chat')
       expect(body.data.endpoints).toHaveProperty('health')
     })
 
     it('GET /api/v1/sandbox/url auto-provisions when no sandbox', async () => {
       mockJwtAuth('user-new')
-      ;(resolveSignedUrl as any).mockResolvedValue(null)
-      ;(provisionSandbox as any).mockResolvedValue({
-        sandbox: { id: 'sb-1' },
-        signedUrl: 'https://sandbox.example.com/new',
+      ;(resolveSandboxUrl as any).mockResolvedValue(null)
+      ;(provisionFlyMachine as any).mockResolvedValue({
+        sandbox: { daytona_id: 'machine-new' },
+        signedUrl: 'https://meios-sandbox-test.fly.dev',
       })
       ;(getSandboxByUserId as any).mockResolvedValue({
         port: 18800,
-        signed_url_exp: '2026-04-01T00:00:00Z',
+        signed_url_exp: null,
       })
 
       const res = await req('/api/v1/sandbox/url', {
@@ -268,45 +274,7 @@ describe('Gateway E2E', () => {
       })
       expect(res.status).toBe(200)
       const body = await res.json()
-      expect(body.data.url).toBe('https://sandbox.example.com/new')
-    })
-
-    it('POST /api/v1/sandbox/ssh returns SSH token', async () => {
-      mockJwtAuth('user-1')
-      ;(createSshToken as any).mockResolvedValue({
-        token: 'ssh-token',
-        host: 'sandbox.example.com',
-        command: 'ssh -o ...',
-      })
-
-      const res = await req('/api/v1/sandbox/ssh', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer jwt',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ expires_in_minutes: 30 }),
-      })
-      expect(res.status).toBe(200)
-      const body = await res.json()
-      expect(body.ok).toBe(true)
-      expect(body.data.token).toBe('ssh-token')
-      expect(body.data.expires_in_minutes).toBe(30)
-    })
-
-    it('POST /api/v1/sandbox/ssh returns 404 when no sandbox', async () => {
-      mockJwtAuth('user-1')
-      ;(createSshToken as any).mockResolvedValue(null)
-
-      const res = await req('/api/v1/sandbox/ssh', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer jwt',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      })
-      expect(res.status).toBe(404)
+      expect(body.data.url).toBe('https://meios-sandbox-test.fly.dev')
     })
   })
 
@@ -315,7 +283,7 @@ describe('Gateway E2E', () => {
   describe('Catch-all proxy', () => {
     it('proxies authenticated requests to sandbox', async () => {
       mockJwtAuth('user-1')
-      ;(resolveSandboxUrl as any).mockResolvedValue('https://sandbox.example.com')
+      ;(resolveSandboxUrl as any).mockResolvedValue({ url: 'https://sandbox.example.com', machineId: 'machine-1' })
 
       // The proxy will call fetch() to forward to sandbox
       // We mock global fetch for this test
@@ -342,7 +310,7 @@ describe('Gateway E2E', () => {
     it('returns 503 when sandbox provision fails', async () => {
       mockJwtAuth('user-1')
       ;(resolveSandboxUrl as any).mockResolvedValue(null)
-      ;(provisionSandbox as any).mockRejectedValue(new Error('Sandbox API down'))
+      ;(provisionFlyMachine as any).mockRejectedValue(new Error('Sandbox API down'))
 
       const res = await req('/some-path', {
         headers: { 'Authorization': 'Bearer jwt' },

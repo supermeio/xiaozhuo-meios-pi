@@ -15,7 +15,6 @@ describe('config', () => {
   function setRequiredEnv() {
     process.env.SUPABASE_URL = 'https://test.supabase.co'
     process.env.SUPABASE_SECRET_KEY = 'test-secret'
-    process.env.DAYTONA_API_KEY = 'daytona-key'
     process.env.LITELLM_PROXY_URL = 'https://litellm.example.com'
     process.env.LITELLM_MASTER_KEY = 'litellm-master'
   }
@@ -36,7 +35,6 @@ describe('config', () => {
 
     expect(config.supabase.url).toBe('https://test.supabase.co')
     expect(config.supabase.secretKey).toBe('test-secret')
-    expect(config.daytona.apiKey).toBe('daytona-key')
     expect(config.litellm.proxyUrl).toBe('https://litellm.example.com')
     expect(config.litellm.masterKey).toBe('litellm-master')
   })
@@ -59,20 +57,6 @@ describe('config', () => {
     setRequiredEnv()
     const { config } = await import('./config.js?jwks=' + Date.now())
     expect(config.supabase.jwksUrl).toBe('https://test.supabase.co/auth/v1/.well-known/jwks.json')
-  })
-
-  it('uses default daytona API URL when not set', async () => {
-    setRequiredEnv()
-    delete process.env.DAYTONA_API_URL
-    const { config } = await import('./config.js?daytona=' + Date.now())
-    expect(config.daytona.apiUrl).toBe('https://app.daytona.io')
-  })
-
-  it('uses custom daytona API URL when set', async () => {
-    setRequiredEnv()
-    process.env.DAYTONA_API_URL = 'https://custom.daytona.io'
-    const { config } = await import('./config.js?daytona2=' + Date.now())
-    expect(config.daytona.apiUrl).toBe('https://custom.daytona.io')
   })
 
   it('sets r2 to undefined when R2_ENDPOINT is not set', async () => {

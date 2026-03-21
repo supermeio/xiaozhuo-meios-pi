@@ -6,16 +6,11 @@ function required(key: string): string {
 
 export const config = {
   port: parseInt(process.env.PORT ?? '8080'),
-  sandboxProvider: (process.env.SANDBOX_PROVIDER ?? 'daytona') as 'daytona' | 'flyio',
   supabase: {
     url: required('SUPABASE_URL'),
     secretKey: required('SUPABASE_SECRET_KEY'),
     // JWKS endpoint for JWT verification (ECC P-256)
     get jwksUrl() { return `${this.url}/auth/v1/.well-known/jwks.json` },
-  },
-  daytona: {
-    apiKey: required('DAYTONA_API_KEY'),
-    apiUrl: process.env.DAYTONA_API_URL ?? 'https://app.daytona.io',
   },
   litellm: {
     proxyUrl: required('LITELLM_PROXY_URL'),
@@ -23,12 +18,12 @@ export const config = {
   },
   meios: {
     repoUrl: process.env.MEIOS_REPO_URL ?? 'https://github.com/supermeio/xiaozhuo-meios-pi.git',
-    // LLM proxy URL for sandboxes (Supabase Edge Function — whitelisted by Daytona)
+    // LLM proxy URL for sandboxes (Supabase Edge Function)
     llmProxyUrl: process.env.MEIOS_LLM_PROXY_URL
       ?? `${required('SUPABASE_URL')}/functions/v1/llm-proxy`,
     gatewayPort: 18800,
   },
-  // Fly.io sandbox compute (replaces Daytona for production)
+  // Fly.io sandbox compute
   flyio: {
     apiToken: process.env.FLYIO_API_TOKEN ?? '',
     appName: process.env.FLYIO_APP_NAME ?? 'meios-sandbox-test',

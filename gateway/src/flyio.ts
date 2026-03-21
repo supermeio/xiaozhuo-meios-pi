@@ -121,6 +121,14 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
         JUICEFS_TOKEN: config.flyio.juicefsToken,
         JUICEFS_GCS_KEY_B64: config.flyio.gcsKeyB64,
         JUICEFS_VOLUME: config.flyio.juicefsVolume,
+        // R2 file sync (CDN image delivery)
+        ...(config.r2?.endpoint ? {
+          R2_ENDPOINT: config.r2.endpoint,
+          R2_ACCESS_KEY_ID: config.r2.accessKeyId,
+          R2_SECRET_ACCESS_KEY: config.r2.secretAccessKey,
+          R2_BUCKET: config.r2.bucket ?? 'meios-images',
+          R2_PUBLIC_URL: config.r2.publicUrl ?? '',
+        } : {}),
       },
       guest: {
         cpu_kind: 'shared',

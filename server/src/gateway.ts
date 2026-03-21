@@ -26,7 +26,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createAgentSession, codingTools, SessionManager } from '@mariozechner/pi-coding-agent'
 import { getModel } from '@mariozechner/pi-ai'
-import { readFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 import { initCron, listTasks } from './cron.js'
@@ -748,6 +748,82 @@ const server = createServer(async (req, res) => {
       }))
 
       ok(res, { tasks })
+      return
+    }
+
+    // ── GET /fs — list directory contents ──
+    if (url.pathname === '/fs' && method === 'GET') {
+      const relPath = url.searchParams.get('path') || ''
+
+      if (relPath.includes('..')) {
+        fail(res, 'Invalid path', 400)
+        return
+      }
+
+      const absPath = relPath ? resolve(WORKSPACE, relPath) : WORKSPACE
+      if (!absPath.startsWith(WORKSPACE)) {
+        fail(res, 'Access denied', 403)
+        return
+      }
+
+      if (!existsSync(absPath)) {
+        fail(res, 'Path not found', 404)
+        return
+      }
+
+      const stat = statSync(absPath)
+      if (!stat.isDirectory()) {
+        fail(res, 'Not a directory', 400)
+        return
+      }
+
+      const entries = readdirSync(absPath, { withFileTypes: true })
+        .filter(e => !e.name.startsWith('.'))
+        .map(e => {
+          const entryPath = resolve(absPath, e.name)
+          const entryStat = statSync(entryPath)
+          return {
+            name: e.name,
+            type: e.isDirectory() ? 'directory' : 'file',
+            size: e.isDirectory() ? undefined : entryStat.size,
+            modifiedAt: entryStat.mtime.toISOString(),
+          }
+        })
+        .sort((a, b) => {
+          // Directories first, then alphabetical
+          if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+          return a.name.localeCompare(b.name)
+        })
+
+      ok(res, { path: relPath || '/', entries })
+      return
+    }
+
+    // ── PUT /files/* — write/update workspace files ──
+    if (url.pathname.startsWith('/files/') && method === 'PUT') {
+      const relPath = decodeURIComponent(url.pathname.slice('/files/'.length))
+
+      if (relPath.includes('..') || relPath.startsWith('/')) {
+        fail(res, 'Invalid path', 400)
+        return
+      }
+
+      const absPath = resolve(WORKSPACE, relPath)
+      if (!absPath.startsWith(WORKSPACE)) {
+        fail(res, 'Access denied', 403)
+        return
+      }
+
+      // Ensure parent directory exists
+      const parentDir = resolve(absPath, '..')
+      if (!existsSync(parentDir)) {
+        mkdirSync(parentDir, { recursive: true })
+      }
+
+      const body = await readBody(req)
+      writeFileSync(absPath, body, 'utf-8')
+
+      ok(res, { path: relPath, size: Buffer.byteLength(body, 'utf-8') })
       return
     }
 

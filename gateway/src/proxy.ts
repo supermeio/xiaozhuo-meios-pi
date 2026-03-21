@@ -5,7 +5,6 @@ import { config } from './config.js'
 import {
   resolveSandboxUrl,
   forceRefreshSignedUrl,
-  provisionSandbox,
   provisionFlyMachine,
 } from './sandbox.js'
 import { log, logError } from './log.js'
@@ -15,14 +14,12 @@ import { log, logError } from './log.js'
 const provisionLocks = new Map<string, Promise<{ sandbox: Sandbox; signedUrl: string }>>()
 
 /**
- * Proxy an authenticated request to the user's sandbox.
- *
- * Works with both Daytona and Fly.io backends, controlled by SANDBOX_PROVIDER env var.
+ * Proxy an authenticated request to the user's sandbox (Fly.io).
  *
  * Flow:
  *   1. Resolve sandbox URL for user (auto-provisions if none exists)
  *   2. Forward request (method, path, headers, body)
- *   3. If 401/403 from sandbox → refresh URL → retry once (Daytona only)
+ *   3. If 401/403 from sandbox → refresh URL → retry once
  *   4. Return sandbox response (preserves { ok, data, error } envelope)
  */
 function plog(msg: string, data?: Record<string, unknown>) { log('proxy', msg, data) }
@@ -40,17 +37,13 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
     try {
       let pending = provisionLocks.get(user.id)
       if (!pending) {
-        pending = config.sandboxProvider === 'flyio'
-          ? provisionFlyMachine(user.id)
-          : provisionSandbox(user.id)
+        pending = provisionFlyMachine(user.id)
         provisionLocks.set(user.id, pending)
         try {
           const result = await pending
           resolved = {
             url: result.signedUrl,
-            machineId: config.sandboxProvider === 'flyio'
-              ? result.sandbox.daytona_id
-              : undefined,
+            machineId: result.sandbox.daytona_id,
           }
         } finally {
           provisionLocks.delete(user.id)
@@ -59,9 +52,7 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
         const result = await pending
         resolved = {
           url: result.signedUrl,
-          machineId: config.sandboxProvider === 'flyio'
-            ? result.sandbox.daytona_id
-            : undefined,
+          machineId: result.sandbox.daytona_id,
         }
       }
     } catch (err: any) {
@@ -82,7 +73,7 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
   let response = await forwardRequest(c, targetUrl, resolved.machineId)
   plog('forward done', { path, status: response.status, ms: Date.now() - t1, totalMs: Date.now() - t0 })
 
-  // If sandbox returned 401/403, try refreshing the URL once (Daytona only)
+  // If sandbox returned 401/403, try refreshing the URL once
   if (response.status === 401 || response.status === 403) {
     const refreshedUrl = await forceRefreshSignedUrl(user.id)
     if (refreshedUrl) {

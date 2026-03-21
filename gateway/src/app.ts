@@ -4,7 +4,7 @@ import { authMiddleware } from './auth.js'
 import { proxyToSandbox } from './proxy.js'
 import { llmProxy } from './llm-proxy.js'
 import { createApiKey, listApiKeys, revokeApiKey } from './api-keys.js'
-import { getSandboxUrl, getSandboxSsh } from './sandbox-url.js'
+import { getSandboxUrl } from './sandbox-url.js'
 
 export const app = new Hono()
 
@@ -65,7 +65,6 @@ app.post('/api/v1/keys', createApiKey)
 app.get('/api/v1/keys', listApiKeys)
 app.delete('/api/v1/keys/:id', revokeApiKey)
 app.get('/api/v1/sandbox/url', getSandboxUrl)
-app.post('/api/v1/sandbox/ssh', getSandboxSsh)
 
 // ── Catch-all: proxy to sandbox ──
 

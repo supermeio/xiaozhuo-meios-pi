@@ -1,7 +1,7 @@
 /**
  * Fly.io Machines API client for sandbox lifecycle management.
  *
- * Replaces Daytona SDK for sandbox provisioning. Each user gets a Fly Machine
+ * Each user gets a Fly Machine
  * with JuiceFS-backed persistent storage.
  *
  * Machines are accessed via Fly Proxy (public URL + fly-force-instance-id header)

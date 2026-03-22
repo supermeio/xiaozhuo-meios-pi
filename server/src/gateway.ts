@@ -31,7 +31,7 @@ import { resolve, join } from 'node:path'
 import { wardrobeTools, setWorkspaceRoot } from './tools.js'
 import { initCron, listTasks } from './cron.js'
 import { initHeartbeat } from './heartbeat.js'
-import { initSync, getImageUrl } from './sync.js'
+import { initSync, getImageUrl, ensureUploaded } from './sync.js'
 import { textToContentBlocks, parseJsonlMessages, type ParsedContentBlock, type ParsedMessage } from './parsers.js'
 import {
   listCollectionsWithCounts,
@@ -419,32 +419,36 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
       const isError = (event as any).isError ?? false
       sendSSE({ type: 'tool-end', toolName, toolCallId, isError })
 
-      // For generate_image: find the just-created image and send it immediately
+      // For generate_image: find the just-created image, upload to CDN, then send URL
       if (toolName === 'generate_image' && !isError) {
-        try {
-          // Scan image directories for the most recently created file
-          const imageDirs = ['images', 'looks']
-          let newestFile: { dir: string, name: string, mtime: number } | null = null
-          for (const dir of imageDirs) {
-            const dirPath = resolve(WORKSPACE, dir)
-            if (!existsSync(dirPath)) continue
-            for (const f of readdirSync(dirPath)) {
-              const mtime = statSync(resolve(dirPath, f)).mtimeMs
-              if (!newestFile || mtime > newestFile.mtime) {
-                newestFile = { dir, name: f, mtime }
+        (async () => {
+          try {
+            // Scan image directories for the most recently created file
+            const imageDirs = ['images', 'looks']
+            let newestFile: { dir: string, name: string, mtime: number } | null = null
+            for (const dir of imageDirs) {
+              const dirPath = resolve(WORKSPACE, dir)
+              if (!existsSync(dirPath)) continue
+              for (const f of readdirSync(dirPath)) {
+                const mtime = statSync(resolve(dirPath, f)).mtimeMs
+                if (!newestFile || mtime > newestFile.mtime) {
+                  newestFile = { dir, name: f, mtime }
+                }
               }
             }
-          }
-          if (newestFile && Date.now() - newestFile.mtime < 60_000) {
-              const filePath = `${newestFile.dir}/${newestFile.name}`
-              const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
-              sendSSE({
-                type: 'image',
-                url: cdnUrl(filePath),
-                imageId,
-              })
-          }
-        } catch { /* ignore */ }
+            if (newestFile && Date.now() - newestFile.mtime < 60_000) {
+                const filePath = `${newestFile.dir}/${newestFile.name}`
+                // Ensure file is on CDN before sending URL to client
+                await ensureUploaded(WORKSPACE, filePath)
+                const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
+                sendSSE({
+                  type: 'image',
+                  url: cdnUrl(filePath),
+                  imageId,
+                })
+            }
+          } catch { /* ignore */ }
+        })()
       }
     }
 

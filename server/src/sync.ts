@@ -290,6 +290,25 @@ export async function initSync(workspacePath: string): Promise<{ stop: () => voi
 }
 
 /**
+ * Upload a single file to R2 immediately (bypasses watcher debounce).
+ * Used by chatStream to ensure an image is on CDN before sending the URL to the client.
+ * Returns true if uploaded successfully, false if sync is not configured.
+ */
+export async function ensureUploaded(workspacePath: string, relPath: string): Promise<boolean> {
+  const gatewayUrl = process.env.MEIOS_GATEWAY_URL
+  const machineSecret = process.env.GATEWAY_SECRET
+  const userId = process.env.MEIOS_USER_ID
+  if (!gatewayUrl || !machineSecret || !userId) return false
+
+  const fullPath = join(workspacePath, relPath)
+  if (!existsSync(fullPath)) return false
+
+  const config: SyncConfig = { workspacePath, userId, gatewayUrl, machineSecret }
+  await uploadFile(config, relPath, fullPath)
+  return true
+}
+
+/**
  * Get the public URL for a synced file.
  * Returns null if R2 is not configured.
  */

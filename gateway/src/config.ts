@@ -22,6 +22,8 @@ export const config = {
     llmProxyUrl: process.env.MEIOS_LLM_PROXY_URL
       ?? `${required('SUPABASE_URL')}/functions/v1/llm-proxy`,
     gatewayPort: 18800,
+    /** Public URL of this gateway (for sandboxes to call back) */
+    gatewayUrl: process.env.MEIOS_GATEWAY_URL ?? '',
   },
   // Fly.io sandbox compute
   flyio: {

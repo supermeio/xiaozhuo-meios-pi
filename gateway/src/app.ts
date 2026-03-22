@@ -5,6 +5,7 @@ import { proxyToSandbox } from './proxy.js'
 import { llmProxy } from './llm-proxy.js'
 import { createApiKey, listApiKeys, revokeApiKey } from './api-keys.js'
 import { getSandboxUrl } from './sandbox-url.js'
+import { sandboxAuthMiddleware, presignUpload, deleteObject, listObjects } from './sync-api.js'
 
 export const app = new Hono()
 
@@ -12,7 +13,7 @@ export const app = new Hono()
 app.use('*', cors({
   origin: process.env.CORS_ORIGIN ?? '*',
   allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-goog-api-key', 'anthropic-version', 'anthropic-beta'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Machine-Secret', 'x-api-key', 'x-goog-api-key', 'anthropic-version', 'anthropic-beta'],
 }))
 
 // ── Public routes ──
@@ -53,6 +54,13 @@ app.post('/v1/chat/completions', llmProxy)
 app.post('/openai/*', llmProxy)
 app.post('/google/*', llmProxy)
 app.post('/moonshot/*', llmProxy)
+
+// ── Sandbox-to-gateway internal API (authenticated by machine secret) ──
+
+app.use('/internal/v1/*', sandboxAuthMiddleware)
+app.post('/internal/v1/sync/presign', presignUpload)
+app.delete('/internal/v1/sync/object', deleteObject)
+app.get('/internal/v1/sync/list', listObjects)
 
 // ── Authenticated routes ──
 

@@ -8,6 +8,7 @@
  * rather than private IPv6, so the outer gateway can run on any cloud.
  */
 
+import { randomBytes } from 'node:crypto'
 import { config } from './config.js'
 import { log, logError } from './log.js'
 
@@ -96,8 +97,10 @@ export interface CreateMachineOptions {
  */
 export async function createMachine(opts: CreateMachineOptions): Promise<{
   machineId: string
+  machineSecret: string
 }> {
   const region = opts.region ?? config.flyio.region
+  const machineSecret = randomBytes(32).toString('hex')
 
   slog('creating machine...', { userId: opts.userId, region })
 
@@ -108,8 +111,8 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
       env: {
         // User identity
         MEIOS_USER_ID: opts.userId,
-        // Gateway secret — sandbox checks this on every request
-        GATEWAY_SECRET: config.flyio.gatewaySecret,
+        // Per-machine gateway secret — sandbox checks this on every request
+        GATEWAY_SECRET: machineSecret,
         // LLM proxy (all providers via LiteLLM)
         OPENAI_BASE_URL: opts.llmProxyUrl,
         OPENAI_API_KEY: opts.virtualKey,
@@ -120,18 +123,15 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
         GOOGLE_API_KEY: opts.virtualKey,
         KIMI_BASE_URL: opts.llmProxyUrl + '/moonshot',
         KIMI_API_KEY: opts.virtualKey,
-        // JuiceFS persistent storage
+        // JuiceFS persistent storage (per-user isolation via --subdir)
         JUICEFS_TOKEN: config.flyio.juicefsToken,
         JUICEFS_GCS_KEY_B64: config.flyio.gcsKeyB64,
         JUICEFS_VOLUME: config.flyio.juicefsVolume,
-        // R2 file sync (CDN image delivery)
-        ...(config.r2?.endpoint ? {
-          R2_ENDPOINT: config.r2.endpoint,
-          R2_ACCESS_KEY_ID: config.r2.accessKeyId,
-          R2_SECRET_ACCESS_KEY: config.r2.secretAccessKey,
-          R2_BUCKET: config.r2.bucket ?? 'meios-images',
-          R2_PUBLIC_URL: config.r2.publicUrl ?? '',
-        } : {}),
+        JUICEFS_SUBDIR: opts.userId,
+        // R2 CDN URL (read-only, no credentials passed to sandbox)
+        ...(config.r2?.publicUrl ? { R2_PUBLIC_URL: config.r2.publicUrl } : {}),
+        // Gateway URL for presigned upload requests
+        MEIOS_GATEWAY_URL: config.meios.gatewayUrl,
       },
       guest: {
         cpu_kind: 'shared',
@@ -160,7 +160,7 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
   // Wait for machine to be in started state
   await waitForState(machine.id, 'started', 30000)
 
-  return { machineId: machine.id }
+  return { machineId: machine.id, machineSecret }
 }
 
 /**
@@ -225,12 +225,12 @@ export function flyProxyUrl(): string {
 /**
  * Check if a machine's gateway is healthy via Fly Proxy.
  */
-export async function checkHealth(machineId: string, port = 18800): Promise<boolean> {
+export async function checkHealth(machineId: string, machineSecret: string, port = 18800): Promise<boolean> {
   try {
     const res = await fetch(`${flyProxyUrl()}/health`, {
       headers: {
         'fly-force-instance-id': machineId,
-        'X-Gateway-Secret': config.flyio.gatewaySecret,
+        'X-Gateway-Secret': machineSecret,
       },
       signal: AbortSignal.timeout(5000),
     })

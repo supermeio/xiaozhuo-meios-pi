@@ -165,6 +165,14 @@ const CORS_HEADERS = {
 // ── Auth: gateway secret or user JWT ────────────────────────
 const GATEWAY_SECRET = process.env.GATEWAY_SECRET ?? ''
 const MEIOS_USER_ID = process.env.MEIOS_USER_ID ?? ''
+const IS_DEV = process.env.NODE_ENV === 'development' || process.env.MEIOS_DEV === '1'
+
+// Fail-closed: refuse to start without GATEWAY_SECRET in production
+if (!GATEWAY_SECRET && !IS_DEV) {
+  console.error('[FATAL] GATEWAY_SECRET is not set. Refusing to start without auth secret in production.')
+  console.error('  Set GATEWAY_SECRET, or set NODE_ENV=development / MEIOS_DEV=1 for local dev.')
+  process.exit(1)
+}
 
 /** Get CDN URL for an image path, falling back to /files/ for dev mode. */
 function cdnUrl(filePath: string): string {
@@ -176,8 +184,11 @@ function cdnUrl(filePath: string): string {
 }
 
 function checkAuth(req: IncomingMessage): boolean {
-  // Skip auth if no secret configured (dev mode)
-  if (!GATEWAY_SECRET) return true
+  // In dev mode with no secret, allow all requests
+  if (!GATEWAY_SECRET && IS_DEV) return true
+
+  // Fail closed: no secret configured → deny (should not reach here in prod due to boot check)
+  if (!GATEWAY_SECRET) return false
 
   // Check X-Gateway-Secret header (from outer gateway)
   const secret = req.headers['x-gateway-secret']

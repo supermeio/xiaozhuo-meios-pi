@@ -21,8 +21,9 @@
 ```bash
 cd gateway/
 
-# IMPORTANT: --source deploys do NOT inherit existing env vars/secrets.
-# You MUST specify ALL env vars and secrets every time.
+# --set-env-vars REPLACES all env vars. --set-secrets REPLACES all secrets.
+# You MUST specify ALL env vars and secrets every time, or the old ones are lost.
+# (Use --update-env-vars to add/change specific vars without touching others.)
 HTTPS_PROXY=http://127.0.0.1:7890 ALL_PROXY=http://127.0.0.1:7890 \
 gcloud run deploy meios-gateway \
   --source . \
@@ -54,6 +55,13 @@ GATEWAY_SECRET=GATEWAY_SECRET:latest" \
 ```bash
 curl https://api.meios.ai/ping
 # Expected: {"ok":true,"data":{"version":"0.1.0"}}
+
+# If deploy fails (e.g. missing env vars), traffic stays on the last healthy revision.
+# Check which revision is serving:
+gcloud run revisions list --service meios-gateway --region us-central1 --limit=3
+
+# Verify SSE streaming works:
+curl -N https://api.meios.ai/sse-test
 ```
 
 ### Update env vars only (no rebuild)
@@ -164,7 +172,8 @@ supabase migration repair --status reverted <MIGRATION_TIMESTAMP>
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Cloud Run deploy: `Missing required env var` | `--source` deploy doesn't inherit env vars | Use full `--set-env-vars` + `--set-secrets` |
+| Cloud Run deploy: `Missing required env var` | `--set-env-vars` replaces ALL vars; old ones are lost | Always specify ALL env vars + secrets in every `--source` deploy |
+| Cloud Run deploy succeeds but traffic on old revision | Previous deploy failed, traffic stayed on last healthy revision | Check `gcloud run revisions list`, deploy again with correct config |
 | `supabase db push`: connection timeout | No proxy configured | Add `HTTPS_PROXY=http://127.0.0.1:7890` |
 | `supabase db push`: migration history mismatch | Remote has migrations not in local | Run `supabase migration repair --status reverted <ID>` |
 | Fly build: `entrypoint.sh not found` | Built from repo root instead of `server/` | `cd server/` before `flyctl deploy` |

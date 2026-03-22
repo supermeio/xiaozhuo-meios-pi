@@ -465,6 +465,11 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
   })
 
   session.prompt(input, { systemPrompt, abortSignal: abortController.signal, images: [] })
+    .catch((err: any) => {
+      sendSSE({ type: 'error', message: err?.message ?? 'Agent prompt failed' })
+      res.write('data: [DONE]\n\n')
+      res.end()
+    })
 }
 
 // ── Route matching ──────────────────────────────────────────

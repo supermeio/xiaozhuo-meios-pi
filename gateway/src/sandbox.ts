@@ -68,7 +68,7 @@ export async function provisionFlyMachine(userId: string): Promise<{ sandbox: Sa
 
   // 2. Create Fly Machine (with services for Fly Proxy access)
   const proxyUrl = config.meios.llmProxyUrl
-  const { machineId } = await createMachine({
+  const { machineId, machineSecret } = await createMachine({
     userId,
     llmProxyUrl: proxyUrl,
     virtualKey,
@@ -80,7 +80,7 @@ export async function provisionFlyMachine(userId: string): Promise<{ sandbox: Sa
   let healthy = false
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 3000))
-    healthy = await checkHealth(machineId, port)
+    healthy = await checkHealth(machineId, machineSecret, port)
     if (healthy) {
       slog(`health check passed on attempt ${i + 1}`)
       break
@@ -99,6 +99,7 @@ export async function provisionFlyMachine(userId: string): Promise<{ sandbox: Sa
     signed_url_exp: null,    // No expiry for Fly Proxy
     port,
     token: keyName,
+    machine_secret: machineSecret,
     token_expires_at: null,
     status: 'active',
   })
@@ -114,7 +115,7 @@ export async function provisionFlyMachine(userId: string): Promise<{ sandbox: Sa
  *
  * Returns { url, machineId } where machineId is used for the Fly Proxy routing header.
  */
-export async function resolveSandboxUrl(userId: string): Promise<{ url: string; machineId?: string } | null> {
+export async function resolveSandboxUrl(userId: string): Promise<{ url: string; machineId?: string; machineSecret?: string } | null> {
   const t0 = Date.now()
   const sandbox = await getSandboxByUserId(userId)
   if (!sandbox) return null
@@ -139,7 +140,7 @@ export async function resolveSandboxUrl(userId: string): Promise<{ url: string; 
     const port = sandbox.port ?? config.meios.gatewayPort
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 3000))
-      const healthy = await checkHealth(sandbox.daytona_id, port)
+      const healthy = await checkHealth(sandbox.daytona_id, sandbox.machine_secret ?? '', port)
       if (healthy) {
         slog('resolve: health check passed', { attempt: i + 1, totalMs: Date.now() - t0 })
         break
@@ -149,7 +150,7 @@ export async function resolveSandboxUrl(userId: string): Promise<{ url: string; 
   }
 
   slog('resolve: done', { machineId: sandbox.daytona_id, state: machine.state, totalMs: Date.now() - t0 })
-  return { url: flyProxyUrl(), machineId: sandbox.daytona_id }
+  return { url: flyProxyUrl(), machineId: sandbox.daytona_id, machineSecret: sandbox.machine_secret ?? undefined }
 }
 
 /**

@@ -1,7 +1,6 @@
 import type { Context } from 'hono'
 import type { AuthUser } from './auth.js'
 import type { Sandbox } from './db.js'
-import { config } from './config.js'
 import {
   resolveSandboxUrl,
   forceRefreshSignedUrl,
@@ -44,6 +43,7 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
           resolved = {
             url: result.signedUrl,
             machineId: result.sandbox.daytona_id,
+            machineSecret: result.sandbox.machine_secret ?? undefined,
           }
         } finally {
           provisionLocks.delete(user.id)
@@ -53,6 +53,7 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
         resolved = {
           url: result.signedUrl,
           machineId: result.sandbox.daytona_id,
+          machineSecret: result.sandbox.machine_secret ?? undefined,
         }
       }
     } catch (err: any) {
@@ -70,7 +71,7 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
   // Forward the request
   const t1 = Date.now()
   plog('forwarding', { targetUrl, machineId: resolved.machineId })
-  let response = await forwardRequest(c, targetUrl, resolved.machineId)
+  let response = await forwardRequest(c, targetUrl, resolved.machineId, resolved.machineSecret)
   plog('forward done', { path, status: response.status, ms: Date.now() - t1, totalMs: Date.now() - t0 })
 
   // If sandbox returned 401/403, try refreshing the URL once
@@ -78,14 +79,14 @@ export async function proxyToSandbox(c: Context): Promise<Response> {
     const refreshedUrl = await forceRefreshSignedUrl(user.id)
     if (refreshedUrl) {
       const retryUrl = refreshedUrl + path
-      response = await forwardRequest(c, retryUrl, resolved.machineId)
+      response = await forwardRequest(c, retryUrl, resolved.machineId, resolved.machineSecret)
     }
   }
 
   return response
 }
 
-async function forwardRequest(c: Context, targetUrl: string, machineId?: string): Promise<Response> {
+async function forwardRequest(c: Context, targetUrl: string, machineId?: string, machineSecret?: string): Promise<Response> {
   const method = c.req.method
   const headers = new Headers()
 
@@ -99,10 +100,12 @@ async function forwardRequest(c: Context, targetUrl: string, machineId?: string)
     headers.set('Accept', accept)
   }
 
-  // Fly.io routing: force request to specific machine + auth secret
+  // Fly.io routing: force request to specific machine + per-machine auth secret
   if (machineId) {
     headers.set('fly-force-instance-id', machineId)
-    headers.set('X-Gateway-Secret', config.flyio.gatewaySecret)
+    if (machineSecret) {
+      headers.set('X-Gateway-Secret', machineSecret)
+    }
   }
 
   const init: RequestInit = { method, headers }

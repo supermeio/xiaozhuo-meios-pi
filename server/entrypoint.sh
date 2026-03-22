@@ -11,7 +11,11 @@ if [ -n "$JUICEFS_TOKEN" ] && [ -n "$JUICEFS_GCS_KEY_B64" ]; then
 
   VOLUME_NAME="${JUICEFS_VOLUME:-meios-persistent}"
   echo "[entrypoint] mounting JuiceFS volume $VOLUME_NAME at /persistent..."
-  /usr/local/bin/jfsmount mount "$VOLUME_NAME" /persistent --token "$JUICEFS_TOKEN" -d 2>&1
+  if [ -n "$JUICEFS_SUBDIR" ]; then
+    /usr/local/bin/jfsmount mount "$VOLUME_NAME" /persistent --token "$JUICEFS_TOKEN" --subdir "/$JUICEFS_SUBDIR" -d 2>&1
+  else
+    /usr/local/bin/jfsmount mount "$VOLUME_NAME" /persistent --token "$JUICEFS_TOKEN" -d 2>&1
+  fi
   echo "[entrypoint] JuiceFS mounted"
 
   # Use /persistent as workspace if not explicitly set

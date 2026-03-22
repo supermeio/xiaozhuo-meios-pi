@@ -11,6 +11,7 @@ export interface Sandbox {
   signed_url_exp: string | null
   port: number
   token: string | null
+  machine_secret: string | null
   status: 'active' | 'suspended' | 'error'
   token_expires_at: string | null
   created_at: string
@@ -37,6 +38,18 @@ export async function getSandboxByUserId(userId: string): Promise<Sandbox | null
     .from('sandboxes')
     .select('*')
     .eq('user_id', userId)
+    .eq('status', 'active')
+    .single()
+
+  if (error || !data) return null
+  return data as Sandbox
+}
+
+export async function getSandboxByMachineSecret(secret: string): Promise<Sandbox | null> {
+  const { data, error } = await getSupabase()
+    .from('sandboxes')
+    .select('*')
+    .eq('machine_secret', secret)
     .eq('status', 'active')
     .single()
 

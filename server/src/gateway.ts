@@ -24,7 +24,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { createAgentSession, codingTools, SessionManager } from '@mariozechner/pi-coding-agent'
+import { createAgentSession, codingTools, SessionManager, DefaultResourceLoader, SettingsManager } from '@mariozechner/pi-coding-agent'
 import { getModel } from '@mariozechner/pi-ai'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs'
 import { resolve, join } from 'node:path'
@@ -143,7 +143,7 @@ const model = {
   provider: 'openai',
   baseUrl: process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
   reasoning: true,
-  input: ['text'] as string[],
+  input: ['text'] as ("text" | "image")[],
   cost: { input: 0.6, output: 3.0, cacheRead: 0.1, cacheWrite: 0 },
   contextWindow: 131072,
   maxTokens: 8192,
@@ -153,6 +153,20 @@ const model = {
 initCron(WORKSPACE)
 initHeartbeat(WORKSPACE)
 initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message))
+
+// ── Pre-create resource loader (skip all discovery to avoid slow JuiceFS scans) ──
+const settingsManager = SettingsManager.create(AGENT_DIR, AGENT_DIR)
+const resourceLoader = new DefaultResourceLoader({
+  cwd: AGENT_DIR,          // Use ephemeral dir, NOT /persistent (JuiceFS)
+  agentDir: AGENT_DIR,
+  settingsManager,
+  noExtensions: true,
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+})
+// Skip reload() — we don't need skills/extensions/prompts/themes.
+// System prompt is set via session.agent.setSystemPrompt() per request.
 
 // ── Response helpers ────────────────────────────────────────
 
@@ -305,7 +319,7 @@ async function getOrCreateSession(sessionId?: string) {
 
   mkdirSync(sessDir, { recursive: true })
 
-  let sessionManager: InstanceType<typeof SessionManager>
+  let sessionManager: SessionManager
   try {
     sessionManager = SessionManager.continueRecent(WORKSPACE, sessDir)
   } catch {
@@ -313,13 +327,15 @@ async function getOrCreateSession(sessionId?: string) {
   }
 
   const { session } = await createAgentSession({
-    cwd: WORKSPACE,
+    cwd: AGENT_DIR,          // Use ephemeral dir to avoid JuiceFS scans
     agentDir: AGENT_DIR,
     model,
     tools: codingTools,
     customTools: wardrobeTools,
     thinkingLevel: 'minimal',
     sessionManager,
+    resourceLoader,
+    settingsManager,
   })
 
   const id = sessDir.split('/').pop()!
@@ -335,8 +351,7 @@ interface ChatResult {
 }
 
 async function chat(session: any, input: string): Promise<ChatResult> {
-  const systemPrompt = loadSystemPrompt()
-  const abortController = new AbortController()
+  session.agent.setSystemPrompt(loadSystemPrompt())
 
   return new Promise<ChatResult>((resolve, reject) => {
     const textChunks: string[] = []
@@ -365,14 +380,21 @@ async function chat(session: any, input: string): Promise<ChatResult> {
       }
     })
 
-    session.prompt(input, { systemPrompt, abortSignal: abortController.signal, images: [] })
+    session.prompt(input, { images: [] })
   })
 }
 
 // ── SSE Streaming Chat ──────────────────────────────────────
 
 function chatStream(session: any, input: string, sessionId: string, res: ServerResponse): void {
+  const t0 = Date.now()
+  console.log(`[chatStream] loadSystemPrompt start`)
   const systemPrompt = loadSystemPrompt()
+  console.log(`[chatStream] loadSystemPrompt done (+${Date.now() - t0}ms)`)
+
+  // Set system prompt on the agent (PromptOptions doesn't accept systemPrompt)
+  session.agent.setSystemPrompt(systemPrompt)
+
   const textChunks: string[] = []
 
   res.writeHead(200, {
@@ -386,10 +408,21 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
     res.write(`data: ${JSON.stringify(data)}\n\n`)
   }
 
+  // SSE keepalive: send comment every 20s to prevent Cloud Run / proxy timeout
+  const heartbeat = setInterval(() => {
+    try { res.write(': keepalive\n\n') } catch { /* connection already closed */ }
+  }, 20_000)
+
   // Send session ID immediately
   sendSSE({ type: 'session', sessionId })
+  console.log(`[chatStream] session.prompt() about to call (+${Date.now() - t0}ms)`)
 
+  let firstEventLogged = false
   const unsub = session.subscribe((event: AgentEvent) => {
+    if (!firstEventLogged) {
+      console.log(`[chatStream] first agent event: ${event.type} (+${Date.now() - t0}ms)`)
+      firstEventLogged = true
+    }
     if (event.type === 'message_update') {
       const evt = (event as any).assistantMessageEvent
       if (evt?.type === 'text_delta' && evt.delta) {
@@ -438,8 +471,15 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
             }
             if (newestFile && Date.now() - newestFile.mtime < 60_000) {
                 const filePath = `${newestFile.dir}/${newestFile.name}`
-                // Ensure file is on CDN before sending URL to client
-                await ensureUploaded(WORKSPACE, filePath)
+                // Upload to CDN with 30s timeout; fall back to /files/ URL on failure
+                try {
+                  await Promise.race([
+                    ensureUploaded(WORKSPACE, filePath),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('upload timeout')), 30_000)),
+                  ])
+                } catch (uploadErr: any) {
+                  console.error(`[chatStream] ensureUploaded failed: ${uploadErr.message}, falling back to /files/`)
+                }
                 const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
                 sendSSE({
                   type: 'image',
@@ -454,6 +494,7 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
 
     if (event.type === 'agent_end') {
       unsub()
+      clearInterval(heartbeat)
       let text: string
       if (textChunks.length > 0) {
         text = textChunks.join('')
@@ -475,12 +516,14 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
   const abortController = new AbortController()
   res.on('close', () => {
     unsub()
+    clearInterval(heartbeat)
     abortController.abort()
     session.abort().catch(() => {})
   })
 
-  session.prompt(input, { systemPrompt, abortSignal: abortController.signal, images: [] })
+  session.prompt(input, { images: [] })
     .catch((err: any) => {
+      clearInterval(heartbeat)
       sendSSE({ type: 'error', message: err?.message ?? 'Agent prompt failed' })
       res.write('data: [DONE]\n\n')
       res.end()
@@ -524,6 +567,8 @@ const server = createServer(async (req, res) => {
 
     // ── POST /chat ──
     if (url.pathname === '/chat' && method === 'POST') {
+      const t0 = Date.now()
+      console.log(`[chat] request received`)
       let rawBody: string
       try {
         rawBody = await readBody(req)
@@ -542,7 +587,9 @@ const server = createServer(async (req, res) => {
 
       let session: any, sessionId: string
       try {
+        console.log(`[chat] getOrCreateSession start (+${Date.now() - t0}ms)`);
         ({ session, sessionId } = await getOrCreateSession(reqSessionId))
+        console.log(`[chat] getOrCreateSession done (+${Date.now() - t0}ms)`)
       } catch (err: any) {
         fail(res, err.message, 400)
         return

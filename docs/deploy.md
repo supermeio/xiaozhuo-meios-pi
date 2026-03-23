@@ -16,18 +16,42 @@
 - `gcloud` CLI authenticated with project `xiaozhuo-meios-pi`
 - Proxy for China region: `HTTPS_PROXY=http://127.0.0.1:7890`
 
-### Deploy
+### Deploy (two-step: build then deploy)
+
+Use the two-step approach (build image first, then deploy from image).
+Do NOT use `--source .` — it conflates build and deploy, and can create
+revisions with 0% traffic when env vars or secrets are misconfigured.
 
 ```bash
 cd gateway/
 
-# --set-env-vars REPLACES all env vars. --set-secrets REPLACES all secrets.
-# You MUST specify ALL env vars and secrets every time, or the old ones are lost.
-# (Use --update-env-vars to add/change specific vars without touching others.)
+export REGION="us-central1"
+export REPO="cloud-run-source-deploy"
+export IMAGE="${REGION}-docker.pkg.dev/xiaozhuo-meios-pi/${REPO}/meios-gateway:latest"
+
+# Step 1: build and push image
+HTTPS_PROXY=http://127.0.0.1:7890 ALL_PROXY=http://127.0.0.1:7890 \
+gcloud builds submit --tag "$IMAGE"
+
+# Step 2: deploy from pre-built image (keeps existing env vars and secrets)
 HTTPS_PROXY=http://127.0.0.1:7890 ALL_PROXY=http://127.0.0.1:7890 \
 gcloud run deploy meios-gateway \
-  --source . \
-  --region us-central1 \
+  --image "$IMAGE" \
+  --region "$REGION" \
+  --timeout 300
+```
+
+### First deploy / update all env vars
+
+Only needed on first deploy or when adding new env vars/secrets.
+`--set-env-vars` and `--set-secrets` REPLACE all existing values.
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7890 ALL_PROXY=http://127.0.0.1:7890 \
+gcloud run deploy meios-gateway \
+  --image "$IMAGE" \
+  --region "$REGION" \
+  --timeout 300 \
   --set-env-vars "\
 SUPABASE_URL=https://exyqukzhnjhbypakhlsp.supabase.co,\
 LITELLM_PROXY_URL=https://litellm-proxy-932630247740.us-central1.run.app,\
@@ -46,8 +70,7 @@ R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest,\
 FLYIO_API_TOKEN=FLYIO_API_TOKEN:latest,\
 JUICEFS_ACCESS_KEY=JUICEFS_ACCESS_KEY:latest,\
 JUICEFS_GCS_KEY_B64=JUICEFS_GCS_KEY_B64:latest,\
-GATEWAY_SECRET=GATEWAY_SECRET:latest" \
-  --quiet
+GATEWAY_SECRET=GATEWAY_SECRET:latest"
 ```
 
 ### Verify
@@ -172,8 +195,9 @@ supabase migration repair --status reverted <MIGRATION_TIMESTAMP>
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Cloud Run deploy: `Missing required env var` | `--set-env-vars` replaces ALL vars; old ones are lost | Always specify ALL env vars + secrets in every `--source` deploy |
-| Cloud Run deploy succeeds but traffic on old revision | Previous deploy failed, traffic stayed on last healthy revision | Check `gcloud run revisions list`, deploy again with correct config |
+| Cloud Run deploy: `Missing required env var` | `--set-env-vars` replaces ALL vars; old ones are lost | Use `--image` deploy (keeps env vars); only use `--set-env-vars` on first deploy |
+| Cloud Run deploy succeeds but 0% traffic | `--source .` deploy can silently fail; revision created but unhealthy | Use two-step deploy (`gcloud builds submit` + `gcloud run deploy --image`) |
+| Chat request times out (connection lost) | Cloud Run default timeout is 240s, image generation can exceed that | Set `--timeout 300` on gateway service |
 | `supabase db push`: connection timeout | No proxy configured | Add `HTTPS_PROXY=http://127.0.0.1:7890` |
 | `supabase db push`: migration history mismatch | Remote has migrations not in local | Run `supabase migration repair --status reverted <ID>` |
 | Fly build: `entrypoint.sh not found` | Built from repo root instead of `server/` | `cd server/` before `flyctl deploy` |

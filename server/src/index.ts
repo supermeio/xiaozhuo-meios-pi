@@ -7,29 +7,12 @@
  *   Interactive: node --import tsx src/index.ts
  */
 
-import { createAgentSession, codingTools } from '@mariozechner/pi-coding-agent'
+import { createAgentSession, codingTools, type AgentSessionEvent } from '@mariozechner/pi-coding-agent'
 import { getModel } from '@mariozechner/pi-ai'
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { wardrobeTools, setWorkspaceRoot } from './tools.js'
-
-// ── pi-agent event types ──
-
-interface ContentBlock {
-  type: string
-  text?: string
-}
-
-interface AgentMessage {
-  content?: ContentBlock[]
-}
-
-interface AgentEvent {
-  type: string
-  assistantMessageEvent?: { type: string; delta?: string }
-  messages?: AgentMessage[]
-}
 
 // ── Config ──
 const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
@@ -131,17 +114,18 @@ async function main() {
     thinkingLevel: 'minimal',
   })
 
-  const systemPrompt = loadSystemPrompt()
+  // Set system prompt on the agent (PromptOptions doesn't accept systemPrompt)
+  session.agent.setSystemPrompt(loadSystemPrompt())
 
   // ── Run a prompt, collect text via events ──
   async function chat(input: string): Promise<string> {
     return new Promise<string>((resolveText) => {
       const textChunks: string[] = []
 
-      const unsub = session.subscribe((event: AgentEvent) => {
+      const unsub = session.subscribe((event: AgentSessionEvent) => {
         // Collect only text deltas (skip thinking)
         if (event.type === 'message_update') {
-          const evt = event.assistantMessageEvent
+          const evt = (event as any).assistantMessageEvent
           if (evt?.type === 'text_delta' && evt.delta) {
             textChunks.push(evt.delta)
           }
@@ -154,17 +138,17 @@ async function main() {
             resolveText(textChunks.join(''))
           } else {
             // Fallback: extract from final messages
-            const text = (event.messages ?? [])
-              .flatMap((m: AgentMessage) => m.content ?? [])
-              .filter((b: ContentBlock) => b.type === 'text')
-              .map((b: ContentBlock) => b.text)
+            const text = ((event as any).messages ?? [])
+              .flatMap((m: any) => m.content ?? [])
+              .filter((b: any) => b.type === 'text')
+              .map((b: any) => b.text)
               .join('')
             resolveText(text || '[无回复]')
           }
         }
       })
 
-      session.prompt(input, { systemPrompt, abortSignal: undefined, images: [] })
+      session.prompt(input, { images: [] })
     })
   }
 

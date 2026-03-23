@@ -463,7 +463,7 @@ export const viewCollectionTool: ToolDefinition<typeof ViewCollectionParams, str
 }
 
 // ── Export all tools ──
-export const wardrobeTools: ToolDefinition[] = [
+export const wardrobeTools: ToolDefinition<any, any>[] = [
   saveClothingTool,
   listClosetTool,
   getClothingTool,

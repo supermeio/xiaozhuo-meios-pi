@@ -292,44 +292,81 @@ but is NOT acceptable as the sole defense:
 - Advanced attacks (memory dumps, /proc inspection of jfsmount process) may still leak
 - Defense-in-depth requires the credentials to never enter the sandbox environment at all
 
-### Solution: Migrate to self-hosted JuiceFS (open source)
+### Solution: Migrate to self-hosted JuiceFS (open source) + AWS S3
 
 Replace JuiceFS Cloud with self-hosted JuiceFS. This eliminates both problems:
 1. No dependency on juicefs.com (China) → stable mount
-2. Per-user volumes → no shared credentials
+2. Per-user volumes with per-user credentials → zero shared secrets
 
-Architecture:
+#### Architecture decision: Object storage selection
+
+Evaluated 2026-03-24. Requirements: per-user credential isolation, full JuiceFS
+compatibility (including `gc`, `fsck`), low latency from Fly.io `iad`.
+
+| Storage | Per-prefix credentials | JuiceFS full compat | Latency from iad | Notes |
+|---------|----------------------|--------------------|--------------------|-------|
+| **AWS S3** | **IAM Policy per prefix** | **All commands work** | **~1ms (same region)** | **Selected** |
+| Cloudflare R2 | API Token per prefix | gc/fsck/sync/destroy broken | Low | R2 ListObjects unsorted ([JuiceFS docs](https://juicefs.com/docs/community/reference/how_to_set_up_object_storage/#r2)) |
+| GCS | Downscoped Token (1h expiry) | All commands work | ~10ms | Needs token refresh mechanism |
+| Backblaze B2 | Application Key per prefix | All commands work | Medium | Cheap but less mature IAM |
+
+**Decision: AWS S3 (`us-east-1`)**
+
+Reasons:
+- **Per-user IAM**: Create an IAM policy per user scoped to `s3:*` on `arn:aws:s3:::bucket/user-{id}/*`.
+  Permanent credentials (no refresh needed). Leak only affects that user.
+- **Full JuiceFS compatibility**: Native S3 — `gc`, `fsck`, `sync`, `destroy` all work.
+  No workarounds needed (unlike R2's `--backup-meta 0`).
+- **Co-located with Fly.io**: S3 `us-east-1` and Fly.io `iad` are both in Virginia.
+  Sub-millisecond latency for data operations.
+- **R2 was rejected**: Despite having per-prefix tokens, R2's `ListObjects` API returns
+  unsorted results, breaking `juicefs gc` (garbage collection). This limitation has existed
+  since 2022 and Cloudflare has not fixed it — it's an architectural choice, not a bug.
+  ([Source: JuiceFS official docs](https://juicefs.com/docs/community/reference/how_to_set_up_object_storage/#r2),
+  [GitHub #2155](https://github.com/juicedata/juicefs/issues/2155))
+- **GCS was rejected**: Per-user isolation requires Downscoped Tokens which expire after
+  1 hour max. JuiceFS FUSE needs persistent credentials, so a token refresh mechanism
+  would be required — adding complexity with no benefit over S3.
+
+#### Target architecture
+
 ```
 juicefs (open source) = metadata engine + object storage
 
 Metadata: PostgreSQL (Supabase — already have)
-Data:     GCS (already have) or R2 (already have)
-Auth:     no external service needed
+Data:     AWS S3 us-east-1 (new bucket)
+Auth:     no external service needed (no juicefs.com)
 ```
 
 Per-user isolation:
 ```bash
 # During user provisioning (gateway side, not in sandbox):
+# 1. Create PG schema for user's metadata
+# 2. Create S3 IAM user with policy scoped to user's prefix
+# 3. Format JuiceFS volume
 juicefs format \
-  "postgres://supabase-url?prefix=user-${USER_ID}" \
-  "gcs://meios-juicefs/user-${USER_ID}"
+  "postgres://supabase-url?search_path=juicefs_${USER_ID}" \
+  "user-${USER_ID}" \
+  --storage s3 \
+  --bucket https://meios-juicefs.s3.us-east-1.amazonaws.com
 
-# In sandbox (only this user's metadata + data):
+# In sandbox (only this user's metadata + S3 credentials):
 juicefs mount \
-  "postgres://supabase-url?prefix=user-${USER_ID}" \
+  "postgres://supabase-url?search_path=juicefs_${USER_ID}" \
   /persistent
 ```
 
 Each user gets:
-- Own metadata prefix in PostgreSQL (isolated namespace)
-- Own GCS path prefix (isolated data)
-- Credentials scoped to their volume only
+- Own PostgreSQL schema (isolated metadata namespace)
+- Own S3 IAM credentials (can only access `user-{id}/*` prefix)
+- Leak of one user's credentials cannot access any other user's data
 
-| Aspect | JuiceFS Cloud (current) | JuiceFS self-hosted |
-|--------|------------------------|-------------------|
+| Aspect | JuiceFS Cloud (current) | JuiceFS self-hosted + S3 |
+|--------|------------------------|--------------------------|
 | Auth server | juicefs.com (Beijing) | Not needed |
-| Cold start mount | Unreliable (China-US network) | Stable (Supabase in US) |
-| User isolation | Shared token (all users) | Per-user volume |
-| GCS credentials | Shared service account | Per-user scoped |
-| Ops complexity | Low | Medium (manage metadata) |
-| Cost | JuiceFS Cloud subscription | Free (open source) |
+| Cold start mount | Unreliable (China-US) | Stable (Supabase + S3 in US) |
+| User isolation | Shared token (all users) | Per-user volume + per-user S3 IAM |
+| Data credentials | Shared GCS service account | Per-user S3 access key |
+| JuiceFS compat | Full (Cloud managed) | Full (native S3) |
+| Ops complexity | Low | Medium (manage metadata + IAM) |
+| Cost | JuiceFS Cloud subscription | S3 storage (~$0.023/GB/mo) |

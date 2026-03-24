@@ -418,14 +418,27 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
   console.log(`[chatStream] session.prompt() about to call (+${Date.now() - t0}ms)`)
 
   let firstEventLogged = false
+  let firstTextDelta = false
   const unsub = session.subscribe((event: AgentEvent) => {
     if (!firstEventLogged) {
       console.log(`[chatStream] first agent event: ${event.type} (+${Date.now() - t0}ms)`)
       firstEventLogged = true
     }
+    // Log key lifecycle events for timing analysis
+    if (event.type === 'message_start') {
+      const role = (event as any).message?.role
+      console.log(`[chatStream] message_start role=${role} (+${Date.now() - t0}ms)`)
+    }
+    if (event.type === 'turn_start') {
+      console.log(`[chatStream] turn_start (+${Date.now() - t0}ms)`)
+    }
     if (event.type === 'message_update') {
       const evt = (event as any).assistantMessageEvent
       if (evt?.type === 'text_delta' && evt.delta) {
+        if (!firstTextDelta) {
+          console.log(`[chatStream] first text_delta (+${Date.now() - t0}ms)`)
+          firstTextDelta = true
+        }
         textChunks.push(evt.delta)
         sendSSE({ type: 'text-delta', delta: evt.delta })
       }

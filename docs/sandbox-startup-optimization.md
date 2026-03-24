@@ -217,3 +217,119 @@ const resourceLoader = new DefaultResourceLoader({
 
 Core principle: **know where your files are and read them directly.
 Never let the framework "discover" them via recursive directory scanning on networked storage.**
+
+## Problem 4: JuiceFS Cloud mount timeout (juicefs.com in China)
+
+### Symptom
+
+Cold starts intermittently took 2-4 minutes. `jfsmount mount -d` fails with:
+```
+juicefs FATAL: the mount point is not ready in 10 seconds
+```
+
+Even with foreground mount (`-f &`) and 60s timeout, mount still fails intermittently.
+
+### Root cause
+
+`jfsmount` (JuiceFS Cloud binary) authenticates with `https://juicefs.com` on every mount.
+**juicefs.com is hosted on Alibaba Cloud Beijing (IP: 47.93.5.40).**
+
+From Fly.io `iad` (US East) to Alibaba Cloud Beijing:
+- Crosses the Pacific Ocean + Great Firewall
+- Base latency 200-400ms with significant jitter
+- Intermittent packet loss causes `context deadline exceeded`
+
+Verbose logs confirmed:
+```
+auth with https://juicefs.com/volume/meios-persistent/mount
+WARNING: get config: POST https://juicefs.com/volume/meios-persistent/mount:
+  context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+
+When juicefs.com is reachable: mount completes in 4-10s.
+When juicefs.com times out: mount fails even with 60s timeout.
+
+### Interim fixes applied
+
+1. **Foreground mount with shell-controlled timeout** (`-f &` + `mountpoint -q` polling, 60s)
+   - Bypasses jfsmount's hardcoded 10s timeout for `-d` mode
+   - Still fails when juicefs.com is unreachable
+
+2. **`--no-update` flag** (if cached config exists)
+   - Skips the POST to juicefs.com, uses locally cached config
+   - Only works after first successful mount (config cached at `~/.juicefs/volume.conf`)
+   - Cache is lost on every deploy (new Docker image)
+
+3. **Credential cleanup in entrypoint.sh**
+   - After mount: `unset JUICEFS_TOKEN JUICEFS_GCS_KEY_B64`, delete GCS key file
+   - Prevents agent bash tool from reading shared credentials
+   - Note: this is a defense-in-depth measure, not a complete solution (see Security below)
+
+### These fixes are NOT sufficient for production
+
+The fundamental problem remains: JuiceFS Cloud depends on a server in China,
+and China-US network is inherently unreliable. No amount of retrying or caching
+fully solves this.
+
+## CRITICAL: JuiceFS shared credential security issue
+
+### Problem
+
+All sandbox machines share the same credentials:
+- `JUICEFS_TOKEN`: can mount the **entire** JuiceFS volume (all users' data)
+- `JUICEFS_GCS_KEY_B64`: GCS service account private key (can access all GCS data)
+
+The pi-coding-agent has a `bash` tool. If a user triggers `printenv` or reads
+`/proc/self/environ`, they get these shared secrets → can access all users' files.
+
+**This is a catastrophic security risk at scale.** With 100K users sharing one token,
+a single leak exposes everyone.
+
+### Why entrypoint cleanup is not enough
+
+Clearing env vars after mount (`unset`) blocks the most obvious attack vector,
+but is NOT acceptable as the sole defense:
+- Advanced attacks (memory dumps, /proc inspection of jfsmount process) may still leak
+- Defense-in-depth requires the credentials to never enter the sandbox environment at all
+
+### Solution: Migrate to self-hosted JuiceFS (open source)
+
+Replace JuiceFS Cloud with self-hosted JuiceFS. This eliminates both problems:
+1. No dependency on juicefs.com (China) → stable mount
+2. Per-user volumes → no shared credentials
+
+Architecture:
+```
+juicefs (open source) = metadata engine + object storage
+
+Metadata: PostgreSQL (Supabase — already have)
+Data:     GCS (already have) or R2 (already have)
+Auth:     no external service needed
+```
+
+Per-user isolation:
+```bash
+# During user provisioning (gateway side, not in sandbox):
+juicefs format \
+  "postgres://supabase-url?prefix=user-${USER_ID}" \
+  "gcs://meios-juicefs/user-${USER_ID}"
+
+# In sandbox (only this user's metadata + data):
+juicefs mount \
+  "postgres://supabase-url?prefix=user-${USER_ID}" \
+  /persistent
+```
+
+Each user gets:
+- Own metadata prefix in PostgreSQL (isolated namespace)
+- Own GCS path prefix (isolated data)
+- Credentials scoped to their volume only
+
+| Aspect | JuiceFS Cloud (current) | JuiceFS self-hosted |
+|--------|------------------------|-------------------|
+| Auth server | juicefs.com (Beijing) | Not needed |
+| Cold start mount | Unreliable (China-US network) | Stable (Supabase in US) |
+| User isolation | Shared token (all users) | Per-user volume |
+| GCS credentials | Shared service account | Per-user scoped |
+| Ops complexity | Low | Medium (manage metadata) |
+| Cost | JuiceFS Cloud subscription | Free (open source) |

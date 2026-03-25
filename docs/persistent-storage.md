@@ -76,7 +76,7 @@ Agent writes → JuiceFS (/persistent/images/) → R2 sync → iOS app reads
                                         images.meios.ai (Cloudflare CDN)
 ```
 
-- **Persistent storage**: JuiceFS (S3 backend) — agent workspace, closet data, collections DB
+- **Persistent storage**: JuiceFS (S3 backend) — agent workspace, collections DB
 - **Image delivery**: Cloudflare R2 via presigned URL upload — images synced from workspace to R2 CDN
 - JuiceFS and R2 are independent systems serving different purposes
 
@@ -104,8 +104,7 @@ We chose **Fly.io Machines**:
 │  /persistent/       (JuiceFS)                     │ ← user data
 │    ├── .meios/collections.db                      │
 │    ├── images/                                    │
-│    ├── closet/                                    │
-│    └── looks/                                     │
+│    └── ...                                        │
 │                                                   │
 │  juicefs mount $PG_DSN /persistent                │
 │    (open-source binary, per-user PG role)         │

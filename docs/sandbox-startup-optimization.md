@@ -156,6 +156,112 @@ iOS app shows "connection lost" (NSURLErrorDomain Code=-1005) during image gener
 - Add 20s SSE heartbeat (`: keepalive\n\n`)
 - Wrap `ensureUploaded()` with 30s timeout, fallback to `/files/` URL
 
+## Problem 4: Node.js module loading takes 14 seconds
+
+### Symptom
+
+`node dist/gateway.mjs` → `server.listen()` takes 14 seconds on 1CPU/1GB Fly.io machine.
+
+### Root cause
+
+The esbuild config marked all heavy dependencies as `--external`:
+```
+--external:@mariozechner/pi-coding-agent --external:@aws-sdk/client-s3 ...
+```
+
+Result: bundled output was only 66KB, but Node.js still resolved and loaded 294 packages
+from `node_modules/` at runtime — hundreds of file open/read/parse operations on cold disk.
+
+### Fix: Aggressive bundling
+
+Bundle everything except native addons (C++ `.node` files that can't be bundled):
+```
+--external:better-sqlite3    # native SQLite addon
+--external:fsevents          # macOS-only, Linux uses inotify
+--external:koffi             # Windows FFI, not used on Linux
+--external:@silvia-odwyer/photon-node  # native image processing
+--external:@mariozechner/clipboard-*   # native clipboard, CLI-only
+```
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Bundle size | 66KB | 10.5MB |
+| External packages at runtime | 294 | 1 (better-sqlite3) |
+| Import time (local Mac) | 342ms | 207ms |
+| Import time (Fly.io 1CPU, est.) | **14s** | **~1-2s** |
+
+### Why this works
+
+On a cold Firecracker VM with no filesystem cache:
+- **Before**: Node.js opens ~294 `package.json` + `.js` files, each a separate `open()` + `read()` syscall
+- **After**: Node.js reads 1 file (10.5MB), V8 parses it once
+
+The Dockerfile was also updated: runtime stage installs only `better-sqlite3` instead of
+all 294 packages, reducing image build time and size.
+
+## Problem 5: `initSync().reconcile()` runs on startup
+
+### Symptom
+
+Although `initSync()` is fire-and-forget (no `await`), `reconcile()` runs immediately on
+startup, scanning JuiceFS directories and uploading to R2. This competes with the first
+`/chat` request for CPU and I/O.
+
+### Fix: Defer reconcile by 15 seconds
+
+Start the chokidar file watcher immediately (lightweight), but delay `reconcile()` by 15s.
+Any new file changes during the delay are captured by the watcher. The reconcile catches
+pre-existing files that were missed during sandbox sleep.
+
+```typescript
+// Start watcher immediately (lightweight)
+const watcher = startWatcher(config)
+
+// Defer reconcile to avoid competing with first request
+setTimeout(async () => {
+  const { uploaded, deleted } = await reconcile(config)
+}, 15_000)
+```
+
+## Problem 6: SQLite on JuiceFS takes 24 seconds to open
+
+### Symptom
+
+`setWorkspaceRoot()` takes 24 seconds during deferred init. The SQLite DB (`collections.db`)
+lives on JuiceFS at `/persistent/.meios/collections.db`. Opening and initializing it involves
+many small file I/O operations (open, read, fstat, WAL creation, schema execution), each
+going through FUSE → PG metadata query (~600ms).
+
+### Fix: Local ephemeral disk + async backup
+
+1. SQLite DB runs on local disk (`/tmp/meios/<hash>/collections.db`) — instant I/O
+2. On cold start: `copyFileSync()` from JuiceFS → local (single file read, ~1s)
+3. After writes: debounced `db.backup()` to JuiceFS (async, 5s debounce)
+
+```typescript
+// Restore from JuiceFS if local doesn't exist (cold start)
+if (!existsSync(localDbPath) && existsSync(persistentDbPath)) {
+  copyFileSync(persistentDbPath, localDbPath)
+}
+_db = new Database(localDbPath)  // local disk, instant
+
+// After any write:
+function scheduleBackup() {
+  if (backupTimer) clearTimeout(backupTimer)
+  backupTimer = setTimeout(() => {
+    _db.backup(persistentDbPath)  // async, non-blocking
+  }, 5_000)
+}
+```
+
+### Result
+
+| Metric | Before | After |
+|--------|--------|-------|
+| `setWorkspaceRoot()` | **24s** | **1.5s** |
+| Total deferred init | **25s** | **3s** |
+| Chat ready (from machine start) | **40s** | **18s** |
+
 ## Combined results
 
 Cold start (from stopped machine to first token):
@@ -164,22 +270,103 @@ Cold start (from stopped machine to first token):
 |-------|----------|-------------------|
 | Firecracker boot | 2s | 2s |
 | JuiceFS mount | 7s or **FATAL loop (2-4min)** | **7s (retry ensures success)** |
-| Node.js → gateway ready | 14s | 14s |
+| Node.js → HTTP ready | 14s | **6s (aggressive bundling)** |
 | `resourceLoader.reload()` | **64s** | **0s (skipped)** |
 | `getOrCreateSession()` | **hang (5min+)** | **233ms** |
 | `loadSystemPrompt()` | N/A | 21ms |
 | `session.prompt()` → first token | N/A | 59ms |
-| **Total** | **2-5min or hang** | **~24-40s** |
+| Deferred workspace init | N/A (was inline) | **3s (SQLite on local disk)** |
+| `initSync()` reconcile | blocks first request | **deferred 15s (non-blocking)** |
+| **Total (health check)** | **2-5min or hang** | **~15s** |
+| **Total (chat ready)** | | **~18s** |
 
-With `autostop=suspend` (resume from memory snapshot):
+With `autostop=suspend` (resume from memory snapshot, **now enabled**):
 
 | Stage | Time |
 |-------|------|
-| Firecracker resume | 336ms–467ms |
+| Firecracker resume | 500ms–3.3s |
 | `getOrCreateSession()` | 45-151ms |
 | `loadSystemPrompt()` | 12ms (cached) – 6.5s (stale FUSE) |
 | `session.prompt()` → first token | 29-59ms |
-| **Total** | **~1s – 7s** |
+| **Total** | **1.5–4.5s** |
+
+## Decision: `autostop=suspend` over `autostop=stop`
+
+**Enabled on 2026-03-25.** This is the primary operating mode for all meios sandboxes.
+
+### What suspend does
+
+Firecracker saves the entire VM state to a snapshot: CPU registers, memory contents,
+open file handles, FUSE mounts, Node.js heap — everything. Resume restores from this
+snapshot instead of cold booting. No JuiceFS mount, no Node.js startup, no workspace
+init needed.
+
+### Suspend vs stop
+
+| | `autostop=stop` | `autostop=suspend` |
+|---|---|---|
+| Resume time | Cold start (~18s) | Memory snapshot (~1.5-4.5s) |
+| CPU/RAM billing when idle | $0 | $0 |
+| Storage billing when idle | rootfs $0.15/GB/mo | **Same** — rootfs $0.15/GB/mo |
+| How it works | Full shutdown → cold boot | Snapshot save → snapshot restore |
+
+**Billing is identical.** There is no cost penalty for using suspend over stop.
+
+### Requirements and limitations
+
+Suspend requires ([docs](https://fly.io/docs/reference/suspend-resume/)):
+
+- **Memory ≤ 2GB** — snapshot write/restore time grows with memory size.
+  Our machines are 1GB, well within the limit.
+- **No swap, no GPU, no schedule** — none of which we use.
+
+Known caveats:
+- **Some logs may be lost** after resume (minor, non-blocking).
+- **TCP connections are broken** on resume — clients must reconnect.
+  Our iOS app already handles this (SSE reconnects on NSURLError).
+- **JuiceFS stale sessions** — FUSE process resumes with old session state.
+  JuiceFS auto-cleans stale sessions on next metadata operation (confirmed in logs:
+  `clean up stale session 13 ... : <nil>`). No manual intervention needed.
+- **Large memory → slow suspend** — >2GB machines may take seconds to write the
+  snapshot, reducing the benefit. Not an issue at 1GB.
+
+### Why not everyone uses suspend
+
+1. **Memory limit** — many production apps need >2GB, making suspend unavailable.
+2. **Stale state** — some apps need clean restarts to refresh DB connections, config,
+   or cached data. Suspend restores the exact pre-suspend state, including stale caches.
+3. **Network connections break** — apps relying on long-lived TCP/WebSocket connections
+   need reconnection logic. Not all frameworks handle this gracefully.
+4. **Relatively new feature** — suspend was preview until mid-2025. Some teams haven't
+   evaluated it yet.
+
+For meios, none of these are blockers:
+- 1GB memory (within limit)
+- JuiceFS FUSE handles stale sessions automatically
+- iOS app already has SSE reconnection logic
+- No long-lived external TCP connections from the sandbox
+
+### Configuration
+
+```bash
+flyctl machines update <MACHINE_ID> --app meios-sandbox-test \
+  --autostop=suspend \
+  --autostart \
+  --yes
+```
+
+- `autostop=suspend`: Fly proxy suspends machine after idle period (no traffic)
+- `autostart=true`: Fly proxy auto-resumes on incoming HTTP request
+- `min_machines_running=0`: allow all machines to suspend when idle
+
+### When cold start still happens
+
+Suspend only helps for **the same machine resuming**. A full cold start (18s) still
+occurs when:
+- Machine is destroyed and re-provisioned (new user, or manual destroy)
+- Machine image is updated (`flyctl machines update --image ...`)
+- Machine hits max restart count after a crash
+- Fly.io migrates the machine to a different host (rare, but happens)
 
 ## Why openclaw doesn't have this problem
 
@@ -187,12 +374,6 @@ openclaw runs pi-coding-agent on persistent VMs with local SSD:
 - Process stays running (systemd), no cold start per request
 - `reload()` scans local disk: seconds, not minutes
 - No Firecracker, no JuiceFS mount
-
-## Fly.io machine configuration
-
-- `autostop=suspend`: Firecracker memory snapshot, resume in sub-second, $0 while suspended
-- `autostart=true`: Fly proxy auto-starts machine on incoming request
-- `min_machines_running=0`: free tier; set to 1 for always-on (Pro feature, ~$5.70/mo)
 
 ## Future: Skills Support
 

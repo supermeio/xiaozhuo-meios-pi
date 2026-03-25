@@ -76,7 +76,8 @@ const SESSIONS_DIR = resolve(AGENT_DIR, 'sessions')
 
 mkdirSync(AGENT_DIR, { recursive: true })
 mkdirSync(SESSIONS_DIR, { recursive: true })
-setWorkspaceRoot(WORKSPACE)
+// NOTE: setWorkspaceRoot(WORKSPACE) is deferred to after server.listen()
+// to avoid slow JuiceFS I/O blocking server startup. See deferredInit() below.
 
 // ── Load .env.token (persisted by provisioning / token rotation) ──
 // This file is the source of truth — overrides Daytona env vars which
@@ -149,10 +150,29 @@ const model = {
   maxTokens: 8192,
 }
 
-// ── Init cron, heartbeat & file sync ────────────────────────
-initCron(WORKSPACE)
-initHeartbeat(WORKSPACE)
-initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message))
+// ── Deferred init: JuiceFS-touching code runs after server.listen() ──
+// Each JuiceFS file operation (existsSync, mkdirSync, readFileSync, etc.) goes through
+// FUSE → PG metadata query (~600ms latency). Deferring this lets the HTTP server
+// start accepting /health checks immediately while workspace init happens in background.
+let _workspaceReady = false
+function deferredInit() {
+  const t0 = Date.now()
+  console.log('[init] deferred workspace init starting...')
+
+  setWorkspaceRoot(WORKSPACE)
+  console.log(`[init] setWorkspaceRoot done (+${Date.now() - t0}ms)`)
+
+  initCron(WORKSPACE)
+  console.log(`[init] initCron done (+${Date.now() - t0}ms)`)
+
+  initHeartbeat(WORKSPACE)
+  console.log(`[init] initHeartbeat done (+${Date.now() - t0}ms)`)
+
+  _workspaceReady = true
+  console.log(`[init] workspace ready (+${Date.now() - t0}ms)`)
+
+  initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message))
+}
 
 // ── Pre-create resource loader (skip all discovery to avoid slow JuiceFS scans) ──
 const settingsManager = SettingsManager.create(AGENT_DIR, AGENT_DIR)
@@ -572,14 +592,25 @@ const server = createServer(async (req, res) => {
         model: model.id,
         version: VERSION,
         workspace: WORKSPACE,
+        workspaceReady: _workspaceReady,
         activeSessions: sessionCache.size,
-        cronTasks: listTasks().length,
       })
       return
     }
 
     // ── POST /chat ──
     if (url.pathname === '/chat' && method === 'POST') {
+      // Wait for workspace init if still in progress
+      if (!_workspaceReady) {
+        const waitStart = Date.now()
+        while (!_workspaceReady && Date.now() - waitStart < 30_000) {
+          await new Promise(r => setTimeout(r, 100))
+        }
+        if (!_workspaceReady) {
+          fail(res, 'Workspace initialization timed out', 503)
+          return
+        }
+      }
       const t0 = Date.now()
       console.log(`[chat] request received`)
       let rawBody: string
@@ -962,7 +993,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`   model: ${model.name} (${model.id})`)
   console.log(`   workspace: ${WORKSPACE}`)
   console.log(`   version: ${VERSION}`)
-  console.log(`   cron tasks: ${listTasks().length}`)
   console.log('')
   console.log(`Endpoints:`)
   console.log(`   GET    /health`)
@@ -974,4 +1004,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`   GET    /files/*               workspace files`)
   console.log(`   GET    /cron`)
   console.log('')
+
+  // Start JuiceFS-touching init in next tick (non-blocking)
+  setImmediate(deferredInit)
 })

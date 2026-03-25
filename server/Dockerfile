@@ -26,9 +26,8 @@ RUN apt-get update -qq && \
       fuse curl ca-certificates build-essential python3 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install JuiceFS mount binary
-RUN curl -sSL http://s.juicefs.com/static/Linux/mount -o /usr/local/bin/jfsmount && \
-    chmod +x /usr/local/bin/jfsmount
+# Install JuiceFS open-source (self-hosted, no dependency on juicefs.com)
+RUN curl -sSL https://d.juicefs.com/install | sh
 
 WORKDIR /app
 

@@ -3,6 +3,7 @@ import { ensureUserPlan } from './billing.js'
 import { config } from './config.js'
 import { log, logError } from './log.js'
 import { createMachine, startMachine, getMachine, checkHealth, flyProxyUrl } from './flyio.js'
+import { provisionJuiceFS } from './juicefs.js'
 
 function slog(msg: string, data?: Record<string, unknown>) { log('sandbox', msg, data) }
 
@@ -66,17 +67,36 @@ export async function provisionFlyMachine(userId: string): Promise<{ sandbox: Sa
   const { key: virtualKey, keyName } = await createLiteLLMKey(userId)
   slog('LiteLLM virtual key created', { keyName })
 
-  // 2. Create Fly Machine (with services for Fly Proxy access)
+  // 2. Provision per-user JuiceFS volume (PG schema + S3 IAM + format)
+  const juicefs = await provisionJuiceFS(userId)
+  slog('JuiceFS provisioned', { userId })
+
+  // 3. Create Fly Machine (with services for Fly Proxy access)
   const proxyUrl = config.meios.llmProxyUrl
   const { machineId, machineSecret } = await createMachine({
     userId,
     llmProxyUrl: proxyUrl,
     virtualKey,
+    juicefs,
   })
 
   slog(`Fly machine created: ${machineId}`)
 
-  // 3. Wait for gateway to be healthy (via Fly Proxy + fly-force-instance-id)
+  // 4. Store in DB BEFORE health check — sandbox's sync module fires on startup
+  //    and needs the machine_secret to be in DB for authentication.
+  const sandbox = await upsertSandbox({
+    user_id: userId,
+    daytona_id: machineId,
+    signed_url: flyProxyUrl(),
+    signed_url_exp: null,    // No expiry for Fly Proxy
+    port,
+    token: keyName,
+    machine_secret: machineSecret,
+    token_expires_at: null,
+    status: 'active',
+  })
+
+  // 5. Wait for gateway to be healthy (via Fly Proxy + fly-force-instance-id)
   let healthy = false
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 3000))
@@ -90,19 +110,6 @@ export async function provisionFlyMachine(userId: string): Promise<{ sandbox: Sa
   if (!healthy) {
     slog('health check did not pass after 20 attempts')
   }
-
-  // 4. Store in DB — URL is the Fly Proxy base, machineId stored in daytona_id column
-  const sandbox = await upsertSandbox({
-    user_id: userId,
-    daytona_id: machineId,
-    signed_url: flyProxyUrl(),
-    signed_url_exp: null,    // No expiry for Fly Proxy
-    port,
-    token: keyName,
-    machine_secret: machineSecret,
-    token_expires_at: null,
-    status: 'active',
-  })
 
   await ensureUserPlan(userId)
 

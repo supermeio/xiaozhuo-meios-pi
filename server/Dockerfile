@@ -15,6 +15,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY src/ ./src/
+COPY build.mjs ./
 RUN npm run build
 
 # ── Runtime stage: slim image ──
@@ -31,14 +32,16 @@ RUN curl -sSL https://d.juicefs.com/install | sh
 
 WORKDIR /app
 
-# Install production deps only (need build tools for better-sqlite3 native module)
-COPY package.json package-lock.json ./
-RUN npm ci --production && npm cache clean --force
+# Install only better-sqlite3 native module (everything else is bundled)
+# Use a minimal package.json to avoid installing 290+ unnecessary packages
+RUN echo '{"type":"module","dependencies":{"better-sqlite3":"^12.8.0"}}' > package.json
+COPY package-lock.json ./
+RUN npm install better-sqlite3 && npm cache clean --force
 
-# Remove build tools after native modules compiled
+# Remove build tools after native module compiled
 RUN apt-get purge -y build-essential python3 && apt-get autoremove -y
 
-# Copy pre-compiled gateway
+# Copy pre-compiled gateway (10MB single file, all JS deps bundled)
 COPY --from=build /build/dist/ ./dist/
 
 # Startup script

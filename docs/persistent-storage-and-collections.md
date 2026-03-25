@@ -1,10 +1,10 @@
 # Persistent Storage & Image Collections
 
-> Design doc — 2026-03-15
+> Design doc — 2026-03-15, updated 2026-03-25
 
 ## Motivation
 
-meios gives each vertical agent (meio, etc.) a Daytona sandbox with full filesystem access. The agent can create, read, update, and delete images freely. But two gaps remain:
+meios gives each vertical agent (meio, etc.) a Fly.io sandbox with full filesystem access. The agent can create, read, update, and delete images freely. But two gaps remain:
 
 1. **Persistence**: Sandbox filesystems are ephemeral. If a sandbox is destroyed or rebuilt, generated images are lost. The current R2 sync provides a backup, but there's no built-in "persistent filesystem" that survives sandbox lifecycle events with near-zero cold start cost.
 
@@ -12,7 +12,30 @@ meios gives each vertical agent (meio, etc.) a Daytona sandbox with full filesys
 
 Both are platform-level capabilities that benefit any vertical agent, not just meio.
 
-## Decision: JuiceFS + GCS + SQLite Collections
+## Decision: JuiceFS (self-hosted) + AWS S3 + SQLite Collections
+
+### What is JuiceFS
+
+JuiceFS is an open-source POSIX-compatible filesystem that separates metadata and data storage:
+
+```
+Application code (fs.readFileSync, fs.writeFileSync)
+  ↓ POSIX system calls
+JuiceFS FUSE process (adapter + storage engine)
+  ↓ splits into two paths
+  ├→ metadata ops (ls, stat, mkdir) → PostgreSQL
+  └→ data read/write (read, write) → S3 HTTP API
+```
+
+FUSE (Filesystem in Userspace) is a Linux kernel mechanism that allows a userspace program to "pretend" to be a filesystem. JuiceFS translates POSIX file operations into PG queries + S3 requests.
+
+Beyond simple translation, JuiceFS provides storage engine capabilities:
+- **Chunking**: large files split into 4MB chunks on S3, enabling random read/write (S3 natively only supports whole-object operations)
+- **Metadata caching**: `ls`, `stat` results cached in local memory, avoiding PG round-trips
+- **Data caching**: hot data cached on local disk, reads don't hit S3
+- **Consistency**: multiple clients mounting the same volume get consistent metadata via PG transactions
+
+This is why JuiceFS was chosen over simpler alternatives like s3fs-fuse (no chunking, no caching, poor performance).
 
 ### Why JuiceFS (Route C)
 
@@ -22,7 +45,7 @@ We evaluated three approaches:
 |-------|----------|-----------|------------|-------------------|
 | **A** | Daytona Volumes | <1s | None | Full |
 | **B** | R2 API + lazy restore | <1s (db) + on-demand images | None | Partial (needs tool awareness) |
-| **C** | JuiceFS + GCS | <1s (FUSE mount) + on-demand | Metadata engine | Full |
+| **C** | JuiceFS + object storage | <1s (FUSE mount) + on-demand | Metadata engine | Full |
 
 Route C was chosen because:
 - **Agent transparency**: the agent sees a normal POSIX filesystem. No special tools needed for persistence — files written to the mount are automatically durable.
@@ -31,121 +54,98 @@ Route C was chosen because:
 
 Route A was rejected because Daytona Volumes can't run SQLite (no block storage semantics). Route B works but requires every agent to understand lazy-loading — we'd rather make persistence invisible.
 
-### Why GCS over R2
+### Object storage: AWS S3 (migrated from GCS)
 
-We initially planned to use Cloudflare R2 as the object storage backend. During setup we discovered:
-- JuiceFS Cloud Service does not list Cloudflare R2 as a provider
-- JuiceFS Community Edition supports R2 (via S3-compatible API), but with limitations: `gc`, `fsck`, `sync`, `destroy` don't work because R2's ListObjects is not sorted
-- Self-deploying JuiceFS with R2 requires running a metadata engine (Redis), adding operational complexity
+**History**: Initially used JuiceFS Cloud Service with GCS backend (2026-03-15). Migrated to self-hosted JuiceFS + AWS S3 on 2026-03-24 to eliminate:
+1. Dependency on juicefs.com (hosted in China, unreliable from US)
+2. Shared credential security risk (single token = access to all users' data)
 
-GCS was chosen instead because:
-- JuiceFS Cloud Service natively supports GCP — zero configuration friction
-- Our gateway already runs on GCP Cloud Run (us-central) — same cloud, low latency
-- GCS egress costs are manageable for initial phase; for production we add Cloudflare CDN as a reverse proxy in front of GCS (zero egress via Cloudflare caching)
+See [juicefs-s3-migration-plan.md](juicefs-s3-migration-plan.md) for the full decision record including R2/GCS/S3 comparison.
+
+**Current architecture (2026-03-25):**
+- **Metadata**: Supabase PostgreSQL (per-user schema isolation via PG roles)
+- **Data**: AWS S3 `us-east-1` bucket `meios-juicefs` (per-user IAM isolation)
+- **No central service**: open-source JuiceFS binary in each sandbox connects directly to PG + S3
 
 ### Image Delivery to iOS App
 
 ```
-Agent writes → JuiceFS (GCS) → Cloudflare CDN → iOS app reads
-                                  ↑
-                          images.meios.ai CNAME
-                          (caches GCS, zero egress)
+Agent writes → JuiceFS (/persistent/images/) → R2 sync → iOS app reads
+                                                  ↑
+                                        images.meios.ai (Cloudflare CDN)
 ```
 
-- **Storage**: GCS (via JuiceFS) — single source of truth
-- **Delivery**: Cloudflare CDN reverse-proxies GCS — images are cacheable (immutable, high hit rate)
-- **R2 phase-out**: existing R2 sync can be deprecated once GCS + CDN is live
+- **Persistent storage**: JuiceFS (S3 backend) — agent workspace, closet data, collections DB
+- **Image delivery**: Cloudflare R2 via presigned URL upload — images synced from workspace to R2 CDN
+- JuiceFS and R2 are independent systems serving different purposes
 
 ### Why Fly.io over Daytona
 
 We initially built on Daytona but discovered a blocking limitation during JuiceFS integration:
 - Daytona Tier 1-2 sandboxes have **restricted outbound network** (whitelist only)
-- JuiceFS needs to reach `juicefs.com` (metadata) and `googleapis.com` (GCS data)
-- Both are blocked on Tier 1-2. Tier 3 requires **$500 prepaid spend** to unlock
+- JuiceFS needs to reach its metadata engine and object storage
+- Tier 3 requires **$500 prepaid spend** to unlock
 
-We evaluated alternatives (E2B, Modal, Cloudflare Containers, Fly.io, Railway) and chose **Fly.io Machines**:
-- **JuiceFS verified working** — community-confirmed, and we validated it ourselves
+We chose **Fly.io Machines**:
+- **JuiceFS verified working** — FUSE mounts work out of the box (`/dev/fuse` available)
 - **No network restrictions** on any plan
 - **~300ms cold start** (Firecracker microVMs)
 - **Cheapest option** — pay-per-second, stopped machines cost almost nothing
 - **REST API** for programmatic machine create/start/stop/destroy
-- `/dev/fuse` available — FUSE mounts work out of the box
 
 ### Architecture
 
 ```
-┌──────────────────────────────────┐
-│      Fly.io Machine (per-user)   │
-│                                  │
-│  /app/              (ephemeral)  │  ← agent code (baked into image)
-│  /persistent/       (JuiceFS)    │  ← images, collections.db
-│    ├── .meios/collections.db     │
-│    ├── images/                   │
-│    ├── closet/                   │
-│    └── looks/                    │
-│                                  │
-│  JuiceFS Client (FUSE mount)     │
-└──────────┬───────────────────────┘
-           │
-     metadata ops ──→  JuiceFS Cloud Service (hosted, us-east4)
-     data read/write ──→  Google Cloud Storage (us-east4)
+┌──────────────────────────────────────────────────┐
+│      Fly.io Machine (per-user)                    │
+│                                                   │
+│  /app/              (ephemeral)                   │ ← agent code (Docker image)
+│  /persistent/       (JuiceFS)                     │ ← images, collections.db
+│    ├── .meios/collections.db                      │
+│    ├── images/                                    │
+│    ├── closet/                                    │
+│    └── looks/                                     │
+│                                                   │
+│  juicefs mount $PG_DSN /persistent                │
+│    (open-source binary, per-user PG role)         │
+└──────────┬────────────────────┬───────────────────┘
+           │                    │
+     metadata ops          data read/write
+           ↓                    ↓
+   Supabase PostgreSQL     AWS S3 us-east-1
+   (per-user schema)       (per-user IAM)
 ```
 
-### JuiceFS Cloud Service
+### Per-user Security Isolation
 
-For the initial phase, we use JuiceFS hosted cloud service (not self-deployed):
-- **Free tier**: 1TB filesystem, up to 100 concurrent mounts — sufficient for trial
-- **Pay-as-you-go** beyond free tier
-- We provide our own GCS as the data backend; JuiceFS only manages metadata
-- Volume name: `meios-persistent`, region: us-east4
-- Trash expiration: 7 days (recover from accidental deletes)
-- If we outgrow the hosted service or want full control, we can self-deploy with Redis as the metadata engine later
+Each user gets completely isolated credentials:
 
-### GCP Configuration
+| Layer | Isolation | Blast radius if leaked |
+|-------|-----------|----------------------|
+| PG metadata | Per-user role + schema, `REVOKE ALL ON public` | Only that user's file metadata |
+| S3 data | Per-user IAM, policy scoped to `user-{uuid}/*` | Only that user's file data |
+| Sandbox env | Credentials `unset` after mount, per-user PG DSN (no master password) | N/A |
 
-- **Project**: `xiaozhuo-meios-pi`
-- **Service Account**: `juicefs-storage@xiaozhuo-meios-pi.iam.gserviceaccount.com` (Storage Admin)
-- **Auth**: JSON key file, set via `GOOGLE_APPLICATION_CREDENTIALS` env var at mount time
-- **JuiceFS token**: stored in `.env.local` as `JUICEFS_ACCESS_KEY`
+Gateway (Cloud Run) holds admin credentials for provisioning; sandbox never sees them.
 
-### Cold Start Flow (with custom image)
+### Cold Start Performance (2026-03-25)
 
 ```
-1. Fly Machine starts                      (~3s, Firecracker microVM)
-2. JuiceFS client mounts /persistent/      (~1s, FUSE + metadata connect)
-3. Agent starts                            (~1s, node --import tsx)
-4. First image access fetches from GCS     (+100-200ms, then cached locally)
+1. Firecracker start                (~1s)
+2. JuiceFS format (first time only) (~2s, skipped if already formatted)
+3. JuiceFS mount                    (~7s, PG latency from iad → us-west-2)
+4. Node.js gateway startup          (~36s, known optimization pending)
+5. First LLM token                  (~5s, Kimi K2.5 with thinking enabled)
 ```
 
-Total perceived cold start: **~5s** with custom image (curl/fuse/jfsmount pre-installed).
-Without custom image (apt-get on every start): ~27s — not acceptable for production.
+Total cold start: **~50s** (dominated by Node.js startup, not JuiceFS).
 
-### Fly.io Configuration
+### Configuration
 
-- **App**: `meios-sandbox-test` (will rename for production)
-- **Region**: `iad` (US East — close to GCS us-east4)
-- **Per-machine**: shared-cpu-1x, 512MB (can scale up)
-- **Fly.io token**: stored in `.env.local` as `FLYIO_API_TOKEN`
-
-### Verification (2026-03-15/16)
-
-**openclaw-001 (dev VM):**
-- JuiceFS client v5.3.2 installed (Linux ARM64)
-- Mounted `meios-persistent` at `/jfs`
-- Write test: `hello.txt` (10 bytes) — confirmed visible in JuiceFS console
-
-**Daytona sandbox (attempted):**
-- `/dev/fuse` exists, JuiceFS binary installs fine
-- ❌ Blocked by outbound network restrictions (Tier 1) — cannot reach juicefs.com or googleapis.com
-- Would need Tier 3 ($500 prepaid) to unblock
-
-**Fly.io Machine (verified ✅):**
-- Machine created in iad region, node:20-slim base
-- `/dev/fuse` available, JuiceFS v5.3.4 installed and mounted
-- Read `hello.txt` written from openclaw-001 — cross-environment persistence confirmed
-- Wrote `fly-test.txt` — confirmed in JuiceFS console
-- Full cold start (apt + download + mount + read): ~27s
-- Estimated with custom image: ~5s
+- **Fly.io App**: `meios-sandbox-test`, region `iad`
+- **S3 Bucket**: `meios-juicefs`, region `us-east-1`
+- **Supabase PG**: per-user schema `juicefs_{userId}`, per-user role `juicefs_user_{userId}`
+- **Provisioning**: automatic on first user request (gateway creates PG role + IAM user + Fly machine)
 
 ## Collections Data Model
 
@@ -224,37 +224,25 @@ DELETE /collections/:id/images/:imgId → remove image from collection
 
 ### Phase 1: JuiceFS + GCS (infra) ✅ done
 - ✅ Sign up for JuiceFS cloud service (free tier)
-- ✅ Create filesystem `meios-persistent` with GCS backend (us-east4)
-- ✅ Create GCP service account with Storage Admin role
-- ✅ Verify mount + read/write on openclaw-001
-- ✅ Verify mount + read/write on Fly.io Machine
-- ✅ Cross-environment data sharing confirmed
+- ✅ Verify mount + read/write on openclaw-001 and Fly.io
 
 ### Phase 2: Collections (server) ✅ done
-- ✅ Add `better-sqlite3` dependency to server
-- ✅ Create collections.db schema initialization (`server/src/collections.ts`, 36 tests)
-- ✅ Implement collection CRUD + image registration + scan/reconcile
-- ✅ Agent tool functions: create_collection, add_to_collection, list_collections, view_collection
-- ✅ Auto-register images in `generate_image` tool
-- ✅ Gateway API endpoints (6 new endpoints)
-- ✅ Full API validation on openclaw-001
-- Add chokidar watcher to reconcile DB ↔ filesystem
+- ✅ SQLite collections schema, CRUD, agent tools, gateway API endpoints
 
-### Phase 3: Fly.io Migration
-- Build custom Docker image with curl/fuse/jfsmount pre-installed
-- Port sandbox provisioning from Daytona SDK to Fly.io Machines API
-- Configure JuiceFS mount in machine startup script
-- Implement machine lifecycle: create on demand, stop on idle, destroy on archive
-- Update gateway proxy to route to Fly.io machines (replace Daytona signed URLs)
+### Phase 3: Fly.io Migration ✅ done
+- ✅ Custom Docker image with FUSE + JuiceFS pre-installed
+- ✅ Sandbox provisioning via Fly.io Machines API
+- ✅ JuiceFS mount in entrypoint.sh
 
-### Phase 4: API & iOS (gateway + client)
+### Phase 4: Self-hosted JuiceFS + AWS S3 Migration ✅ done (2026-03-25)
+- ✅ Migrate from JuiceFS Cloud (GCS) to self-hosted JuiceFS (Supabase PG + AWS S3)
+- ✅ Per-user PG role + S3 IAM isolation
+- ✅ JuiceFS Cloud fully decommissioned
+- See [juicefs-s3-migration-plan.md](juicefs-s3-migration-plan.md)
+
+### Phase 5: API & iOS (gateway + client)
 - iOS: collection list view, collection detail view
 - iOS: add-to-collection action from image viewer
-
-### Phase 5: CDN & Image Delivery
-- Configure Cloudflare CDN reverse proxy for GCS
-- Update iOS app to fetch images from CDN URL
-- Deprecate R2 sync
 
 ### Phase 6: Smart Collections (future)
 - Define filter DSL (JSON-based)
@@ -263,12 +251,10 @@ DELETE /collections/:id/images/:imgId → remove image from collection
 
 ## References
 
-- [JuiceFS Cloud Service](https://juicefs.com/en/product/cloud-service/)
-- [JuiceFS Docs](https://juicefs.com/docs/cloud/)
-- [JuiceFS + R2 limitations](https://github.com/juicedata/juicefs/issues/2155) — why we chose GCS over R2
-- [JuiceFS on Fly.io with Tigris](https://www.tigrisdata.com/blog/fly-tigris-juicefs/) — community validation
+- [JuiceFS open source](https://github.com/juicedata/juicefs) — 13k+ stars, Go, Apache-2.0
+- [JuiceFS docs](https://juicefs.com/docs/community/)
+- [JuiceFS S3 migration plan](juicefs-s3-migration-plan.md) — full decision record for S3 over R2/GCS
+- [Sandbox startup optimization](sandbox-startup-optimization.md) — cold start diagnosis and fixes
 - [Fly.io Machines API](https://fly.io/docs/machines/overview/)
-- [Fly.io Pricing](https://fly.io/docs/about/pricing/)
-- [Daytona Network Limits](https://www.daytona.io/docs/en/network-limits/) — why we moved away from Daytona
 - Industry models: Apple Photos, Lightroom, PhotoPrism all use SQLite + join table for collections
 - Existing image support: [docs/image-support.md](image-support.md)

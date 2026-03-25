@@ -268,19 +268,21 @@ export async function initSync(workspacePath: string): Promise<{ stop: () => voi
     extensions: DEFAULT_EXTENSIONS,
   }
 
-  // Reconcile on startup
-  console.log('[sync] reconciling workspace → R2...')
-  try {
-    const { uploaded, deleted } = await reconcile(config)
-    console.log(`[sync] reconcile done: ${uploaded} uploaded, ${deleted} deleted`)
-  } catch (err: any) {
-    console.error('[sync] reconcile failed:', err.message)
-    // Continue anyway — watcher will handle new changes
-  }
-
-  // Start real-time watcher
+  // Start real-time watcher immediately (lightweight, no blocking)
   const watcher = startWatcher(config)
   console.log(`[sync] watching ${config.watchDirs?.join(', ')} for changes`)
+
+  // Defer reconcile to avoid competing with first request for CPU/IO.
+  // The watcher catches any new changes in the meantime.
+  setTimeout(async () => {
+    console.log('[sync] reconciling workspace → R2...')
+    try {
+      const { uploaded, deleted } = await reconcile(config)
+      console.log(`[sync] reconcile done: ${uploaded} uploaded, ${deleted} deleted`)
+    } catch (err: any) {
+      console.error('[sync] reconcile failed:', err.message)
+    }
+  }, 15_000)
 
   return {
     stop: () => {

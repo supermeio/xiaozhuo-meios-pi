@@ -1,8 +1,9 @@
 /**
  * Image Collections — SQLite-backed logical grouping for images.
  *
- * Provides a many-to-many relationship between images and collections,
- * backed by a single SQLite file at <workspace>/.meios/collections.db.
+ * SQLite runs on LOCAL ephemeral disk for performance (JuiceFS FUSE adds
+ * ~600ms per I/O operation). The DB is backed up to JuiceFS after writes
+ * so data survives sandbox stop/restart.
  *
  * Images are identified by content hash (SHA-256), so renames/moves
  * don't break collection membership.
@@ -10,7 +11,7 @@
 
 import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import { readFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { resolve, join, relative, extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -51,6 +52,9 @@ export interface CollectionImage {
 
 let _db: Database.Database | null = null
 let _workspaceRoot = ''
+let _persistentDbPath = ''  // JuiceFS path for backup
+const LOCAL_DB_DIR = '/tmp/meios'
+let _backupTimer: ReturnType<typeof setTimeout> | null = null
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS images (
@@ -92,15 +96,53 @@ CREATE INDEX IF NOT EXISTS idx_ci_collection ON collection_images(collection_id)
 
 export function initCollections(workspaceRoot: string): Database.Database {
   _workspaceRoot = workspaceRoot
+
+  // Persistent path on JuiceFS (for backup/restore)
   const meiosDir = resolve(workspaceRoot, '.meios')
   mkdirSync(meiosDir, { recursive: true })
+  _persistentDbPath = resolve(meiosDir, 'collections.db')
 
-  const dbPath = resolve(meiosDir, 'collections.db')
-  _db = new Database(dbPath)
+  // Local ephemeral path (fast, no FUSE overhead).
+  // Use a hash of workspace path to keep DBs isolated per workspace.
+  const wsHash = createHash('md5').update(workspaceRoot).digest('hex').slice(0, 12)
+  const localDir = resolve(LOCAL_DB_DIR, wsHash)
+  mkdirSync(localDir, { recursive: true })
+  const localDbPath = resolve(localDir, 'collections.db')
+
+  // Restore from JuiceFS if local doesn't exist (cold start after stop)
+  if (!existsSync(localDbPath) && existsSync(_persistentDbPath)) {
+    console.log('[collections] restoring DB from JuiceFS...')
+    copyFileSync(_persistentDbPath, localDbPath)
+    // Also copy WAL/SHM if they exist (unlikely but defensive)
+    for (const suffix of ['-wal', '-shm']) {
+      const src = _persistentDbPath + suffix
+      if (existsSync(src)) copyFileSync(src, localDbPath + suffix)
+    }
+  }
+
+  _db = new Database(localDbPath)
   _db.pragma('journal_mode = WAL')
   _db.pragma('foreign_keys = ON')
   _db.exec(SCHEMA)
   return _db
+}
+
+/** Debounced backup: copy local DB to JuiceFS after writes */
+function scheduleBackup() {
+  if (!_persistentDbPath || !_db) return
+  if (_backupTimer) clearTimeout(_backupTimer)
+  _backupTimer = setTimeout(() => {
+    try {
+      // Use SQLite backup API for consistency (no partial writes)
+      _db!.backup(_persistentDbPath).then(() => {
+        // console.log('[collections] backed up to JuiceFS')
+      }).catch((err: any) => {
+        console.error('[collections] backup failed:', err.message)
+      })
+    } catch (err: any) {
+      console.error('[collections] backup failed:', err.message)
+    }
+  }, 5_000) // 5s debounce
 }
 
 function db(): Database.Database {
@@ -159,6 +201,7 @@ export function registerImage(absPath: string, metadata?: Record<string, unknown
     VALUES (@id, @path, @filename, @mime_type, @width, @height, @size_bytes, @created_at, @metadata)
   `).run(record)
 
+  scheduleBackup()
   return record
 }
 
@@ -188,6 +231,7 @@ export function createCollection(name: string, description?: string): Collection
     VALUES (?, ?, ?, ?, ?)
   `).run(id, name, description ?? null, now, now)
 
+  scheduleBackup()
   return db().prepare('SELECT * FROM collections WHERE id = ?').get(id) as Collection
 }
 
@@ -212,12 +256,14 @@ export function updateCollection(collectionId: string, updates: { name?: string;
   db().prepare('UPDATE collections SET name = ?, description = ?, updated_at = ? WHERE id = ?')
     .run(name, description, now, collectionId)
 
+  scheduleBackup()
   return getCollection(collectionId)
 }
 
 /** Delete a collection (does NOT delete images) */
 export function deleteCollection(collectionId: string): boolean {
   const result = db().prepare('DELETE FROM collections WHERE id = ?').run(collectionId)
+  if (result.changes > 0) scheduleBackup()
   return result.changes > 0
 }
 
@@ -250,6 +296,7 @@ export function addToCollection(collectionId: string, imageId: string): boolean 
         .run(imageId, collectionId)
     }
 
+    scheduleBackup()
     return true
   } catch {
     // Already in collection (PRIMARY KEY constraint)
@@ -266,6 +313,7 @@ export function removeFromCollection(collectionId: string, imageId: string): boo
   if (result.changes > 0) {
     db().prepare('UPDATE collections SET updated_at = ? WHERE id = ?')
       .run(new Date().toISOString(), collectionId)
+    scheduleBackup()
   }
 
   return result.changes > 0

@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node --import tsx src/index.ts",
     "dev": "node --watch --import tsx src/index.ts",
-    "build": "esbuild src/gateway.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/gateway.mjs --external:better-sqlite3 --external:chokidar --external:@mariozechner/pi-coding-agent --external:@mariozechner/pi-ai --external:@mariozechner/pi-agent-core --external:@aws-sdk/client-s3 --external:@daytonaio/sdk --external:@sinclair/typebox",
+    "build": "node build.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

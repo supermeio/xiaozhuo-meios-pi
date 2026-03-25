@@ -88,6 +88,14 @@ export interface CreateMachineOptions {
   userId: string
   llmProxyUrl: string
   virtualKey: string
+  juicefs?: {
+    metaUrl: string
+    s3AccessKey: string
+    s3SecretKey: string
+    s3Bucket: string
+    s3Region: string
+    volumeName: string
+  }
   region?: string
 }
 
@@ -123,11 +131,15 @@ export async function createMachine(opts: CreateMachineOptions): Promise<{
         GOOGLE_API_KEY: opts.virtualKey,
         KIMI_BASE_URL: opts.llmProxyUrl + '/moonshot',
         KIMI_API_KEY: opts.virtualKey,
-        // JuiceFS persistent storage (per-user isolation via --subdir)
-        JUICEFS_TOKEN: config.flyio.juicefsToken,
-        JUICEFS_GCS_KEY_B64: config.flyio.gcsKeyB64,
-        JUICEFS_VOLUME: config.flyio.juicefsVolume,
-        JUICEFS_SUBDIR: opts.userId,
+        // JuiceFS self-hosted: per-user PG metadata + S3 data
+        ...(opts.juicefs ? {
+          JUICEFS_META_URL: opts.juicefs.metaUrl,
+          JUICEFS_VOLUME_NAME: opts.juicefs.volumeName,
+          JUICEFS_S3_BUCKET: opts.juicefs.s3Bucket,
+          JUICEFS_S3_REGION: opts.juicefs.s3Region,
+          AWS_ACCESS_KEY_ID: opts.juicefs.s3AccessKey,
+          AWS_SECRET_ACCESS_KEY: opts.juicefs.s3SecretKey,
+        } : {}),
         // R2 CDN URL (read-only, no credentials passed to sandbox)
         ...(config.r2?.publicUrl ? { R2_PUBLIC_URL: config.r2.publicUrl } : {}),
         // Gateway URL for presigned upload requests

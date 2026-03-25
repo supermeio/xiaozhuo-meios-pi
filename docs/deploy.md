@@ -61,15 +61,19 @@ R2_PUBLIC_URL=https://images.meios.ai,\
 FLYIO_APP_NAME=meios-sandbox-test,\
 FLYIO_REGION=iad,\
 FLYIO_SANDBOX_IMAGE=registry.fly.io/meios-sandbox-test:latest,\
-MEIOS_GATEWAY_URL=https://api.meios.ai" \
+MEIOS_GATEWAY_URL=https://api.meios.ai,\
+SUPABASE_DB_HOST=db.exyqukzhnjhbypakhlsp.supabase.co,\
+JUICEFS_S3_BUCKET=meios-juicefs,\
+JUICEFS_S3_REGION=us-east-1" \
   --set-secrets "\
 SUPABASE_SECRET_KEY=SUPABASE_SECRET_KEY:latest,\
+SUPABASE_DB_PASSWORD=SUPABASE_DB_PASSWORD:latest,\
 LITELLM_MASTER_KEY=LITELLM_MASTER_KEY:latest,\
 R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,\
 R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest,\
 FLYIO_API_TOKEN=FLYIO_API_TOKEN:latest,\
-JUICEFS_ACCESS_KEY=JUICEFS_ACCESS_KEY:latest,\
-JUICEFS_GCS_KEY_B64=JUICEFS_GCS_KEY_B64:latest,\
+AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID:latest,\
+AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY:latest,\
 GATEWAY_SECRET=GATEWAY_SECRET:latest"
 ```
 
@@ -191,10 +195,43 @@ HTTPS_PROXY=http://127.0.0.1:7890 ALL_PROXY=http://127.0.0.1:7890 \
 supabase migration repair --status reverted <MIGRATION_TIMESTAMP>
 ```
 
+## Critical: Cloud Run min-instances
+
+LiteLLM proxy **必须**设 `min-instances=1`，否则空闲后缩容到 0，
+下次请求触发 Python 冷启动 **~140 秒**，用户体验为 LLM 首 token 等待 2-3 分钟。
+
+```bash
+# 已设置，勿改回 0
+gcloud run services describe litellm-proxy --region us-central1 \
+  --format "value(spec.template.metadata.annotations.'autoscaling.knative.dev/minScale')"
+# 应输出: 1
+```
+
+**教训（2026-03-25）：** 首 token 延迟 150 秒被误以为是 Kimi K2.5 API 慢或 JuiceFS 慢。
+实际通过逐层排查确认：
+- 直连 Kimi API: 14s（正常）
+- 经 LiteLLM proxy（热）: 10s（正常）
+- 经 LiteLLM proxy（冷）: 154s ← 140 秒是 Cloud Run 冷启动
+
+排查方法：
+```bash
+# 1. 直连 provider API — 确认 provider 本身是否正常
+curl https://api.moonshot.ai/v1/chat/completions -H "Authorization: Bearer $KEY" ...
+
+# 2. 经 LiteLLM — 确认 proxy 层是否引入延迟
+curl https://litellm-proxy-xxx.run.app/chat/completions -H "Authorization: Bearer $LITELLM_KEY" ...
+
+# 3. 对比冷/热请求 — 确认是否冷启动
+# 空闲 15 分钟后再试 vs 立即再试
+```
+
+费用影响：`min-instances=1` 约 $5-10/月（取决于 CPU/memory 配置），远小于用户流失的代价。
+
 ## Common Issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
+| **LLM 首 token 等 2-3 分钟** | **LiteLLM Cloud Run 冷启动（min-instances=0）** | **设 `min-instances=1`，见上方** |
 | Cloud Run deploy: `Missing required env var` | `--set-env-vars` replaces ALL vars; old ones are lost | Use `--image` deploy (keeps env vars); only use `--set-env-vars` on first deploy |
 | Cloud Run deploy succeeds but 0% traffic | `--source .` deploy can silently fail; revision created but unhealthy | Use two-step deploy (`gcloud builds submit` + `gcloud run deploy --image`) |
 | Chat request times out (connection lost) | Cloud Run default timeout is 240s, image generation can exceed that | Set `--timeout 300` on gateway service |

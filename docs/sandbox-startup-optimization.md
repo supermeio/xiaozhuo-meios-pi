@@ -306,7 +306,7 @@ compatibility (including `gc`, `fsck`), low latency from Fly.io `iad`.
 | Storage | Per-prefix credentials | JuiceFS full compat | Latency from iad | Notes |
 |---------|----------------------|--------------------|--------------------|-------|
 | **AWS S3** | **IAM Policy per prefix** | **All commands work** | **~1ms (same region)** | **Selected** |
-| Cloudflare R2 | API Token per prefix | gc/fsck/sync/destroy broken | Low | R2 ListObjects unsorted ([JuiceFS docs](https://juicefs.com/docs/community/reference/how_to_set_up_object_storage/#r2)) |
+| Cloudflare R2 | API Token per prefix | gc/fsck/sync/destroy broken (v1.3.1) | Low | R2 ListObjects unsorted |
 | GCS | Downscoped Token (1h expiry) | All commands work | ~10ms | Needs token refresh mechanism |
 | Backblaze B2 | Application Key per prefix | All commands work | Medium | Cheap but less mature IAM |
 
@@ -319,14 +319,38 @@ Reasons:
   No workarounds needed (unlike R2's `--backup-meta 0`).
 - **Co-located with Fly.io**: S3 `us-east-1` and Fly.io `iad` are both in Virginia.
   Sub-millisecond latency for data operations.
-- **R2 was rejected**: Despite having per-prefix tokens, R2's `ListObjects` API returns
-  unsorted results, breaking `juicefs gc` (garbage collection). This limitation has existed
-  since 2022 and Cloudflare has not fixed it — it's an architectural choice, not a bug.
-  ([Source: JuiceFS official docs](https://juicefs.com/docs/community/reference/how_to_set_up_object_storage/#r2),
-  [GitHub #2155](https://github.com/juicedata/juicefs/issues/2155))
-- **GCS was rejected**: Per-user isolation requires Downscoped Tokens which expire after
-  1 hour max. JuiceFS FUSE needs persistent credentials, so a token refresh mechanism
-  would be required — adding complexity with no benefit over S3.
+
+**R2 detailed evaluation (2026-03-24):**
+
+R2 的 `ListObjects` API 不保证返回排序结果，这是 Cloudflare 的架构选择（非 bug），
+违反了 AWS S3 规范中的字典序保证。
+([JuiceFS docs](https://juicefs.com/docs/community/reference/how_to_set_up_object_storage/#r2),
+[GitHub #2155](https://github.com/juicedata/juicefs/issues/2155))
+
+这是 **Cloudflare 的问题，不是 JuiceFS 的问题**。JuiceFS 合理地依赖了 S3 规范保证。
+
+JuiceFS 正在适配：PR #6389（2025-09-26 合并到 main）让 gc/fsck/destroy 传 `sort=false`，
+不再要求排序。但截至 v1.3.1（2025-12-02，最新正式版）该修复未发布。`sync` 命令仍依赖排序。
+
+| JuiceFS 命令 | 需要排序？ | R2 可用？(v1.3.1) | R2 可用？(main) |
+|-------------|-----------|------------------|----------------|
+| `mount` | 否 | 可以（加 `--backup-meta 0`） | 可以 |
+| `gc` | 是 → 否(main) | **不行** | 可以 |
+| `fsck` | 是 → 否(main) | **不行** | 可以 |
+| `sync` | 是 | **不行** | **不行** |
+| `destroy` | 是 → 否(main) | **不行** | 可以 |
+
+结论：即使自编译 main 分支，`sync` 仍不可用，且依赖未发布代码不适合生产环境。
+S3 完全兼容，无需任何适配。
+
+**GCS was rejected**: Per-user isolation requires Downscoped Tokens which expire after
+1 hour max. JuiceFS FUSE needs persistent credentials, so a token refresh mechanism
+would be required — adding complexity with no benefit over S3.
+
+**Note: 图片存储不受影响。** 图片走的是独立的 Cloudflare R2（通过 presigned URL 上传，
+CDN 直接读取），与 JuiceFS 无关。R2 做简单的对象读写完全没问题，ListObjects 排序问题
+只影响 JuiceFS 的 gc/fsck 等管理命令。迁移 JuiceFS 到 S3 只影响 `/persistent/` 下的
+用户工作空间文件（agent workspace、记忆、配置）。
 
 #### Target architecture
 

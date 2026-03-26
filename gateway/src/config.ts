@@ -47,7 +47,11 @@ export const config = {
     awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? '',
     awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
   },
-  // Google Service Account (optional — credential proxy disabled if not configured)
+  // Credential encryption key for user credentials at rest (AES-256-GCM, 32 bytes hex)
+  credentialEncryptionKey: process.env.CREDENTIAL_ENCRYPTION_KEY
+    ? Buffer.from(process.env.CREDENTIAL_ENCRYPTION_KEY, 'hex')
+    : undefined,
+  // Google Service Account — platform-level fallback (optional)
   google: process.env.GOOGLE_SA_KEY_JSON ? (() => {
     const json = JSON.parse(Buffer.from(process.env.GOOGLE_SA_KEY_JSON, 'base64').toString())
     return {

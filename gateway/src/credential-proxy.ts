@@ -1,16 +1,18 @@
 /**
  * Credential injection proxy — sandbox calls external APIs through the gateway.
  *
- * The sandbox never holds real credentials. Instead, it sends requests to this
- * proxy endpoint, and the gateway injects credentials before forwarding.
+ * Per-user credentials stored encrypted in Supabase PG. The gateway decrypts
+ * them in memory, mints service-specific tokens, and injects into requests.
+ * Falls back to platform-level credentials if user has none configured.
  *
  * MVP: supports Google APIs only (Docs, Drive, Sheets).
- * Uses jose (already a dependency) to mint Google SA OAuth2 tokens.
  */
 
 import type { Context } from 'hono'
 import { SignJWT, importPKCS8 } from 'jose'
 import { config } from './config.js'
+import { getCredential } from './db.js'
+import { decrypt } from './crypto.js'
 
 // ── Allowlist ──
 
@@ -21,7 +23,15 @@ const ALLOWED_HOSTS = new Set([
   'content-docs.googleapis.com',
 ])
 
-// ── Google SA Token Manager ──
+// ── Google SA Config ──
+
+interface GoogleSAConfig {
+  clientEmail: string
+  privateKey: string
+  impersonateUser?: string
+}
+
+// ── Per-user Token Cache ──
 
 const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/documents',
@@ -29,31 +39,36 @@ const GOOGLE_SCOPES = [
 ].join(' ')
 
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
-const REFRESH_MARGIN_MS = 5 * 60 * 1000 // refresh 5 min before expiry
+const REFRESH_MARGIN_MS = 5 * 60 * 1000
+const MAX_CACHE_SIZE = 256
 
-let _cachedToken: { accessToken: string; expiresAt: number } | null = null
+const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>()
 
-async function getGoogleAccessToken(): Promise<string> {
-  if (_cachedToken && Date.now() < _cachedToken.expiresAt - REFRESH_MARGIN_MS) {
-    return _cachedToken.accessToken
+function evictExpired() {
+  const now = Date.now()
+  for (const [key, val] of tokenCache) {
+    if (now > val.expiresAt) tokenCache.delete(key)
+  }
+}
+
+async function getGoogleAccessToken(cacheKey: string, sa: GoogleSAConfig): Promise<string> {
+  const cached = tokenCache.get(cacheKey)
+  if (cached && Date.now() < cached.expiresAt - REFRESH_MARGIN_MS) {
+    return cached.accessToken
   }
 
-  const google = config.google
-  if (!google) throw new Error('Google SA not configured')
-
-  const privateKey = await importPKCS8(google.privateKey, 'RS256')
+  const privateKey = await importPKCS8(sa.privateKey, 'RS256')
   const now = Math.floor(Date.now() / 1000)
 
-  // Build JWT claims for domain-wide delegation (impersonation)
   const claims: Record<string, unknown> = {
-    iss: google.clientEmail,
+    iss: sa.clientEmail,
     scope: GOOGLE_SCOPES,
     aud: TOKEN_ENDPOINT,
     iat: now,
     exp: now + 3600,
   }
-  if (google.impersonateUser) {
-    claims.sub = google.impersonateUser
+  if (sa.impersonateUser) {
+    claims.sub = sa.impersonateUser
   }
 
   const jwt = await new SignJWT(claims as any)
@@ -75,12 +90,60 @@ async function getGoogleAccessToken(): Promise<string> {
   }
 
   const data = await res.json() as { access_token: string; expires_in: number }
-  _cachedToken = {
+  const entry = {
     accessToken: data.access_token,
     expiresAt: Date.now() + data.expires_in * 1000,
   }
 
-  return _cachedToken.accessToken
+  // Evict if cache is full
+  if (tokenCache.size >= MAX_CACHE_SIZE) evictExpired()
+  if (tokenCache.size >= MAX_CACHE_SIZE) {
+    // Still full after eviction — delete oldest
+    const oldest = tokenCache.keys().next().value
+    if (oldest) tokenCache.delete(oldest)
+  }
+
+  tokenCache.set(cacheKey, entry)
+  return entry.accessToken
+}
+
+// ── Resolve credentials for a user ──
+
+async function resolveGoogleSA(userId: string): Promise<{ sa: GoogleSAConfig; cacheKey: string } | null> {
+  // 1. Try user-specific credential from Supabase
+  if (config.credentialEncryptionKey) {
+    const cred = await getCredential(userId, 'google')
+    if (cred) {
+      try {
+        const plaintext = decrypt(
+          Buffer.from(cred.encrypted_data, 'base64'),
+          Buffer.from(cred.iv, 'base64'),
+          config.credentialEncryptionKey,
+        )
+        const sa = JSON.parse(plaintext)
+        return {
+          sa: {
+            clientEmail: sa.client_email,
+            privateKey: sa.private_key,
+            impersonateUser: sa.impersonate_user,
+          },
+          cacheKey: `${userId}:google`,
+        }
+      } catch (err: any) {
+        console.error(`[credential-proxy] failed to decrypt credential for user ${userId}:`, err.message)
+      }
+    }
+  }
+
+  // 2. Fall back to platform-level SA
+  if (config.google) {
+    return {
+      sa: config.google,
+      cacheKey: '__platform__:google',
+    }
+  }
+
+  return null
 }
 
 // ── Route Handler ──
@@ -95,15 +158,11 @@ interface ProxyRequest {
 /**
  * POST /internal/v1/proxy
  *
- * Sandbox sends a request description; gateway injects credentials and forwards.
- *
- * Body: { url, method?, headers?, body? }
- * Returns: { ok, data: { status, headers, body } }
+ * Sandbox sends a request description; gateway resolves per-user credentials,
+ * injects them, and forwards to the external API.
  */
 export async function credentialProxy(c: Context) {
-  if (!config.google) {
-    return c.json({ ok: false, error: 'Credential proxy not configured (no Google SA)' }, 503)
-  }
+  const userId = c.get('sandboxUserId') as string
 
   let req: ProxyRequest
   try {
@@ -130,10 +189,16 @@ export async function credentialProxy(c: Context) {
     return c.json({ ok: false, error: `Host not allowed: ${parsedUrl.hostname}` }, 403)
   }
 
-  // Get Google access token and inject
+  // Resolve credentials (per-user → platform fallback)
+  const resolved = await resolveGoogleSA(userId)
+  if (!resolved) {
+    return c.json({ ok: false, error: 'No Google credentials configured for this user' }, 503)
+  }
+
+  // Get access token (cached per user)
   let accessToken: string
   try {
-    accessToken = await getGoogleAccessToken()
+    accessToken = await getGoogleAccessToken(resolved.cacheKey, resolved.sa)
   } catch (err: any) {
     console.error('[credential-proxy] token error:', err.message)
     return c.json({ ok: false, error: 'Failed to obtain credentials' }, 502)
@@ -155,7 +220,6 @@ export async function credentialProxy(c: Context) {
       signal: AbortSignal.timeout(30_000),
     })
 
-    // Parse response
     const contentType = upstream.headers.get('content-type') ?? ''
     let responseBody: unknown
     if (contentType.includes('application/json')) {
@@ -164,7 +228,6 @@ export async function credentialProxy(c: Context) {
       responseBody = await upstream.text()
     }
 
-    // Extract a few safe response headers
     const responseHeaders: Record<string, string> = {}
     for (const key of ['content-type', 'x-request-id']) {
       const val = upstream.headers.get(key)
@@ -173,11 +236,7 @@ export async function credentialProxy(c: Context) {
 
     return c.json({
       ok: true,
-      data: {
-        status: upstream.status,
-        headers: responseHeaders,
-        body: responseBody,
-      },
+      data: { status: upstream.status, headers: responseHeaders, body: responseBody },
     })
   } catch (err: any) {
     console.error('[credential-proxy] upstream error:', err.message)

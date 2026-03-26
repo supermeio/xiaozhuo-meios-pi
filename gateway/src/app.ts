@@ -4,6 +4,7 @@ import { authMiddleware } from './auth.js'
 import { proxyToSandbox } from './proxy.js'
 import { llmProxy } from './llm-proxy.js'
 import { createApiKey, listApiKeys, revokeApiKey } from './api-keys.js'
+import { putCredential, getCredentials, removeCredential } from './credentials-api.js'
 import { getSandboxUrl } from './sandbox-url.js'
 import { sandboxAuthMiddleware, presignUpload, deleteObject, listObjects } from './sync-api.js'
 import { credentialProxy } from './credential-proxy.js'
@@ -75,6 +76,9 @@ app.post('/api/v1/keys', createApiKey)
 app.get('/api/v1/keys', listApiKeys)
 app.delete('/api/v1/keys/:id', revokeApiKey)
 app.get('/api/v1/sandbox/url', getSandboxUrl)
+app.put('/api/v1/credentials/:service', putCredential)
+app.get('/api/v1/credentials', getCredentials)
+app.delete('/api/v1/credentials/:service', removeCredential)
 
 // ── Catch-all: proxy to sandbox ──
 

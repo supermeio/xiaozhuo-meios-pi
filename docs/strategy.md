@@ -122,7 +122,7 @@ Adding a "meio type" dimension is a session-routing change, not an infra change.
 - Co-located meios share the same LiteLLM virtual key (same budget). Isolated meios
   get their own key.
 
-## Security: Credential Injection Proxy
+## Security: Credential Injection Proxy (implemented)
 
 ### Problem
 
@@ -130,28 +130,35 @@ Meios execute arbitrary code. Real credentials (API keys, service account keys) 
 live inside the sandbox — environment variables and files are readable by the agent's
 bash tool.
 
-### Solution: Gateway HTTP proxy with credential injection
+### Solution: Gateway HTTP proxy with per-user encrypted credential storage
 
 ```
-meio sends request:
-  POST https://docs.googleapis.com/v1/documents
-  Authorization: {GOOGLE_TOKEN}     ← placeholder
-
-Gateway (outside sandbox):
-  1. Target domain in meio.json allowedEndpoints? → allow
-  2. Replace {GOOGLE_TOKEN} placeholder with real value (from secret store)
-  3. Forward to external API
-  4. Scrub sensitive values from response
-  5. Return to meio
+sandbox → POST /internal/v1/proxy { url, method, headers, body }
+              │
+              ├─ user_id (from X-Machine-Secret auth)
+              ├─ Supabase: user_credentials table (per-user, AES-256-GCM encrypted)
+              ├─ Decrypt credential → mint service token (Google OAuth2, etc.)
+              ├─ Inject Authorization header
+              ├─ Validate target domain against allowlist
+              └─ Forward to external API → return response
 ```
 
-**Properties**:
-- **Generic** — Gateway doesn't need to understand specific APIs, just placeholder
-  replacement + domain allowlist + response scrubbing
-- **Zero code changes for new services** — just declare secrets and allowedEndpoints
-  in meio.json
-- **Network egress locked** — sandbox can only reach Gateway, not external APIs directly
-  (enforced at Fly.io network level, when enabled for public launch)
+**Current implementation** (2026-03-26):
+- `POST /internal/v1/proxy` — sandbox sends request description, gateway injects credentials
+- `PUT /api/v1/credentials/:service` — user stores encrypted credential
+- `GET /api/v1/credentials` — list stored credentials (metadata only)
+- `DELETE /api/v1/credentials/:service` — remove credential
+- Per-user Google SA token cache (bounded Map, auto-refresh)
+- Domain allowlist: `docs.googleapis.com`, `sheets.googleapis.com`, `www.googleapis.com`
+- No platform fallback — each user must configure their own credentials
+
+**Security properties**:
+- Supabase PG only stores AES-256-GCM ciphertext + IV
+- Encryption key only in Gateway env vars (GCP Secret Manager)
+- Sandbox never sees real credentials — only the proxy result
+- Per-user isolation: user A's credentials never used for user B's requests
+- **Credentials must NOT go through sandbox** — users upload via Gateway API directly,
+  never via `/chat` (meio has bash tool, session history is readable)
 
 ### Relationship to LiteLLM
 
@@ -160,19 +167,80 @@ LiteLLM is a specialized credential injection for LLM APIs, with added features
 
 **Both coexist**:
 - LLM calls → LiteLLM (specialized, handles format translation + billing)
-- Other external APIs → generic credential injection proxy (lightweight, inject + allowlist)
+- Other external APIs → credential injection proxy (lightweight, inject + allowlist)
 
 ### Security phases
 
 | Phase | Trust model | Approach |
 |-------|------------|----------|
-| Now (internal testing) | Trust user and meio | Env var injection |
-| Open beta | Trust user, partially trust meio | Gateway proxy + credential injection |
-| Public launch | Don't trust meio | Network egress lockdown + phantom tokens + allowlist |
+| Now (internal testing) | Trust user and meio | Per-user encrypted credentials + proxy |
+| Open beta | Trust user, partially trust meio | + meio.json allowedEndpoints enforcement |
+| Public launch | Don't trust meio | + network egress lockdown + phantom tokens |
 
 **Phantom tokens** (public launch enhancement): Gateway generates per-session random
 tokens bound to localhost + session lifetime. Meio only sees phantom tokens — leaked
 tokens are useless outside the sandbox.
+
+## Meio Onboarding
+
+### Two paths, same API
+
+Meios that need external service access (e.g., reader needs Google Docs) require
+credential setup. Two onboarding paths, both using the same `PUT /api/v1/credentials`
+API underneath:
+
+**Path 1: Meio self-guided (human users)**
+
+The meio itself guides the user through setup via chat. No separate onboarding UI
+needed — the meio IS the onboarding interface:
+
+```
+User: help me set up reader meio
+
+Default meio:
+  Reader meio needs Google Docs access. To configure:
+
+  1. Create a Google Service Account (instructions: ...)
+  2. Upload credentials:
+     curl -X PUT https://api.meios.ai/api/v1/credentials/google \
+       -H "Authorization: Bearer <token>" \
+       -d '{ "credential": <sa-key.json contents> }'
+  3. Tell me when done — I'll verify it works.
+```
+
+**Path 2: Heavy agent setup (developers / power users)**
+
+The user's heavy agent (Claude Code, Codex, OpenClaw) reads meios API docs
+(`AGENTS.md`, `llms.txt`, OpenAPI spec) and handles everything:
+
+```
+User to Claude Code: "set up reader meio on my meios account"
+
+Claude Code:
+  1. Read AGENTS.md → understand meios API
+  2. PUT /api/v1/credentials/google → upload user's SA key
+  3. POST /chat { meioType: "reader" } → verify it works
+  4. "Done. Your reader meio is ready."
+```
+
+**Security rule**: Credentials flow directly to Gateway API, never through the sandbox.
+Users must not paste SA keys into chat — the meio's bash tool could read session history.
+
+### Future: meio.json declares dependencies
+
+When meio.json is formalized, the provisioning flow can check requirements automatically:
+
+```json
+{
+  "secrets": {
+    "google": { "required": true, "setup_url": "https://meios.ai/docs/google-sa" }
+  }
+}
+```
+
+Gateway checks `user_credentials` at provisioning time:
+- Has credential → ready
+- Missing credential → return setup instructions with `setup_url`
 
 ## BYOK (Bring Your Own Key)
 
@@ -229,20 +297,21 @@ POST /api/v1/provision
 
 ## Implementation Priority
 
-1. **Credential injection proxy** — Gateway HTTP proxy with placeholder replacement +
-   domain allowlist. This is the true blocker: reader meio needs Google Docs API access,
-   and real credentials cannot live in the sandbox.
-2. **Co-located multi-meio routing** — gateway.ts routes `/chat` by meio type to different
-   SOUL.md / tools. Lightweight: session-level change, no new infra.
-3. **Reader meio** — deploy as second meio type (SOUL.md + coding tools + credential proxy).
-   Validates the co-located multi-meio model.
-4. **meio.json spec** — formalize the template contract once we have two working meios.
-5. **Provisioning API** — `POST /api/v1/meios { template }` creates a meio of any type.
-6. **Tools dynamic loading** — load custom tools from `/persistent/` at runtime. Nice-to-have
-   for meios that need domain-specific tools beyond coding tools + bash.
-7. **Isolated sandbox mode** — 1 user = N Machines. Needed for security-sensitive meios.
-8. **BYOK** — user brings their own LLM key.
-9. **Network egress lockdown + phantom tokens** — before public launch.
+### Done
+1. ~~**Credential injection proxy**~~ — ✅ Per-user encrypted storage + Gateway proxy
+2. ~~**Co-located multi-meio routing**~~ — ✅ meioType param + per-type SOUL.md/tools
+3. ~~**Reader meio**~~ — ✅ Second meio type, e2e tested (summarize → Google Docs)
+4. ~~**Default meio decoupled**~~ — ✅ Generic default, wardrobe is optional type
+
+### Next
+5. **Meio onboarding flow** — meio self-guided credential setup + heavy agent path
+6. **meio.json spec** — formalize the template contract (secrets, allowedEndpoints)
+7. **Provisioning API** — `POST /api/v1/meios { template }` creates a meio of any type
+8. **AGENTS.md + llms.txt + OpenAPI spec** — agent discoverability
+9. **Tools dynamic loading** — custom tools from `/persistent/` at runtime
+10. **Isolated sandbox mode** — 1 user = N Machines
+11. **BYOK** — user brings their own LLM key
+12. **Network egress lockdown + phantom tokens** — before public launch
 
 ## Design Principles
 

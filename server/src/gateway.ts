@@ -345,7 +345,7 @@ const SESSION_ID_RE = /^s-\d+-[a-z0-9]+$/
  * - other types: coding tools only (bash/read/write/edit are sufficient)
  */
 function resolveCustomTools(meioType?: string) {
-  if (!meioType || meioType === 'wardrobe') return wardrobeTools
+  if (meioType === 'wardrobe') return wardrobeTools
   return []  // coding tools (read, write, edit, bash) are always included
 }
 

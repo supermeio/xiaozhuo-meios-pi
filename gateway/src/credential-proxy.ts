@@ -135,14 +135,8 @@ async function resolveGoogleSA(userId: string): Promise<{ sa: GoogleSAConfig; ca
     }
   }
 
-  // 2. Fall back to platform-level SA
-  if (config.google) {
-    return {
-      sa: config.google,
-      cacheKey: '__platform__:google',
-    }
-  }
-
+  // No fallback — each user must configure their own credentials.
+  // Platform-level SA (config.google) is for internal/admin use only.
   return null
 }
 

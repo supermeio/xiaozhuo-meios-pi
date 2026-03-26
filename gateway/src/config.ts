@@ -47,6 +47,15 @@ export const config = {
     awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? '',
     awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
   },
+  // Google Service Account (optional — credential proxy disabled if not configured)
+  google: process.env.GOOGLE_SA_KEY_JSON ? (() => {
+    const json = JSON.parse(Buffer.from(process.env.GOOGLE_SA_KEY_JSON, 'base64').toString())
+    return {
+      clientEmail: json.client_email as string,
+      privateKey: json.private_key as string,
+      impersonateUser: process.env.GOOGLE_IMPERSONATE_USER ?? '',
+    }
+  })() : undefined,
   // R2 file sync (optional — sync disabled in sandbox if not configured)
   r2: process.env.R2_ENDPOINT ? {
     endpoint: process.env.R2_ENDPOINT,

@@ -6,6 +6,7 @@ import { llmProxy } from './llm-proxy.js'
 import { createApiKey, listApiKeys, revokeApiKey } from './api-keys.js'
 import { getSandboxUrl } from './sandbox-url.js'
 import { sandboxAuthMiddleware, presignUpload, deleteObject, listObjects } from './sync-api.js'
+import { credentialProxy } from './credential-proxy.js'
 
 export const app = new Hono()
 
@@ -61,6 +62,7 @@ app.use('/internal/v1/*', sandboxAuthMiddleware)
 app.post('/internal/v1/sync/presign', presignUpload)
 app.delete('/internal/v1/sync/object', deleteObject)
 app.get('/internal/v1/sync/list', listObjects)
+app.post('/internal/v1/proxy', credentialProxy)
 
 // ── Authenticated routes ──
 

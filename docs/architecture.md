@@ -1,10 +1,15 @@
 # meios Architecture
 
-> Updated: 2026-03-12
+> Updated: 2026-03-25
 
 ## Overview
 
-meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance. Each user gets an isolated sandbox with their own agent instance. LLM calls are routed through [LiteLLM](https://docs.litellm.ai/) for unified auth, rate limiting, budget management, and multi-provider support.
+meios is a lightweight vertical AI agent platform. Each user gets an isolated sandbox
+(Fly.io Machine) with persistent storage (JuiceFS), running a customizable meio agent.
+The platform is designed to support multiple meio types (wardrobe styling, reading assistant,
+etc.) through a template system — not locked to a single use case.
+
+Naming: **meio** = a single agent instance; **meios** = the platform.
 
 ## Architecture Diagram
 
@@ -20,36 +25,42 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
 │  Supabase Auth   │                                               │   │
 └──────────────────┘                                               │   │
 ┌──────────────────┐◀──────────────────────────────────────────────┘   │
-│  Supabase PG     │  query sandboxes + LiteLLM tables                 │
+│  Supabase PG     │  sandboxes, billing, JuiceFS metadata             │
 └──────────────────┘                                                   │
-                              proxy (signed URL)                       │
-     ┌─────────────────────────────────┐◀──────────────────────────────┘
-     │     Daytona Sandbox (per-user)  │
-     │  ┌───────────────────────────┐  │
-     │  │  meios gateway (:18800)   │  │
-     │  │  pi-agent + Gemini Flash  │  │
-     │  └───────────┬───────────────┘  │
-     │              │ LLM calls        │
-     └──────────────┼──────────────────┘
-                    │ Authorization: Bearer <LiteLLM virtual key>
-                    ▼
-     ┌──────────────────────────────┐
-     │  Supabase Edge Function     │  *.supabase.co (Daytona 白名单)
-     │  (llm-proxy — thin relay)   │
-     └──────────────┬───────────────┘
-                    │ Bearer <virtual key>
+                              proxy                                    │
+     ┌─────────────────────────────────────────┐◀──────────────────────┘
+     │  Fly.io Machine (per-user sandbox)      │
+     │  ┌───────────────────────────────────┐  │
+     │  │  meios gateway (:18800)           │  │
+     │  │  pi-agent + Kimi K2.5             │  │
+     │  │  SQLite collections (local disk)  │  │
+     │  └───────────┬───────────────────────┘  │
+     │              │                          │
+     │  ┌───────────┴───────────────────────┐  │
+     │  │  JuiceFS FUSE (/persistent/)      │  │
+     │  │  metadata → Supabase PG           │  │
+     │  │  data → AWS S3 us-east-1          │  │
+     │  └───────────────────────────────────┘  │
+     │              │ LLM calls                │
+     └──────────────┼──────────────────────────┘
+                    │ via LiteLLM proxy (OpenAI format)
                     ▼
      ┌──────────────────────────────┐
      │  GCP Cloud Run              │
-     │  LiteLLM Proxy              │  virtual key 鉴权, rate limit,
-     │  litellm-proxy              │  budget, routing, usage tracking
+     │  LiteLLM Proxy              │  virtual key auth, rate limit,
+     │  (min-instances=1)          │  budget, routing, usage tracking
      └──────────────┬───────────────┘
                     │ real API keys
                     ▼
      ┌──────────────────────────────┐
      │  LLM Providers              │
-     │  Anthropic / Google Gemini  │
-     │  OpenAI / Moonshot (Kimi)   │
+     │  Moonshot (Kimi K2.5)       │  ← primary
+     │  Anthropic / Google / OpenAI│
+     └──────────────────────────────┘
+
+     ┌──────────────────────────────┐
+     │  Cloudflare R2              │  image CDN (images.meios.ai)
+     │  presigned URL upload       │  chokidar auto-sync from sandbox
      └──────────────────────────────┘
 ```
 
@@ -58,74 +69,69 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
 ### iOS App (Meio)
 - SwiftUI, iOS 17+, built with xcodegen
 - Supabase Auth SDK (email + password)
+- SSE streaming with reconnection logic
 - API endpoint: `https://api.meios.ai`
 
 ### Auth Gateway (`gateway/`)
 - Hono + TypeScript on GCP Cloud Run (us-central1)
 - JWT verification via Supabase JWKS (ECC P-256)
-- Per-user sandbox routing with signed URL management
-- Auto-provisions sandbox for new users on first request
-- LLM proxy routes relay to LiteLLM (thin relay, no business logic)
+- Per-user Fly.io Machine management (provision, start, proxy)
+- JuiceFS provisioning (PG schema + S3 IAM per user)
+- Image sync API (presigned URL → R2 upload)
+- LiteLLM virtual key lifecycle management
 
 ### LiteLLM Proxy (`litellm/`)
 - [LiteLLM](https://github.com/BerriAI/litellm) on GCP Cloud Run (us-central1)
-- URL: Cloud Run service URL (see `LITELLM_PROXY_URL` env var)
-- Dashboard: `${LITELLM_PROXY_URL}/ui/` (admin / master key)
-- Config: `litellm/config.yaml`
+- **min-instances=1** (Python cold start is 140s, must stay warm)
 - Database: shared Supabase Postgres (`LiteLLM_` prefixed tables)
-- Resources: 1 vCPU, 1 GB RAM, min 0 / max 3
 
-**Responsibilities:**
 | Feature | Details |
 |---------|---------|
-| Auth | Virtual key per sandbox, created via `/key/generate` at provisioning |
+| Auth | Virtual key per sandbox, created at provisioning |
 | Rate limiting | 60 rpm per virtual key |
 | Budget | $5/month per key (free tier), auto-reset every 30 days |
-| Routing | Model name → provider (e.g., `gemini-3.1-flash-lite-preview` → Google) |
-| Usage tracking | Per-request token count + cost, queryable via API and Dashboard |
-| Multi-provider | Anthropic, Google Gemini, OpenAI, Moonshot/Kimi |
-
-**Supported endpoints:**
-| Endpoint | Format | Use case |
-|----------|--------|----------|
-| `/chat/completions` | OpenAI format | Primary — all providers via translation |
-| `/anthropic/v1/messages` | Anthropic native (pass-through) | Claude tool calling — zero translation |
-
-### Supabase Edge Function (`gateway/supabase/functions/llm-proxy/`)
-- **Thin relay** — exists solely as a network hop
-- Daytona sandboxes (Tier 1/2) can reach `*.supabase.co` but NOT `*.run.app`
-- Extracts virtual key from request, forwards to LiteLLM, returns response
-- ~100 lines, no business logic (auth/rate-limit/budget all handled by LiteLLM)
-- Deployed with `--no-verify-jwt` (LiteLLM validates the virtual key)
-
-**Path mapping:**
-| Incoming path | LiteLLM target | Format |
-|---------------|---------------|--------|
-| `/v1/messages*` | `/anthropic/v1/messages*` | Anthropic native (pass-through) |
-| `/chat/completions` | `/chat/completions` | OpenAI format |
-| `/openai/*` | `/openai/*` | OpenAI native |
+| Routing | Model name → provider (e.g., `kimi-k2.5` → Moonshot) |
+| Usage tracking | Per-request token count + cost |
+| Multi-provider | Moonshot/Kimi, Anthropic, Google Gemini, OpenAI |
 
 ### Supabase
 - Auth: ECC P-256 JWT, JWKS verification
 - Postgres tables:
-  - `sandboxes` — user_id → daytona_id, signed_url, LiteLLM key name
+  - `sandboxes` — user_id → fly_machine_id, status, gateway_secret
   - `user_plans` — billing period + plan assignment
-  - `LiteLLM_*` — ~30 tables managed by LiteLLM (virtual keys, spend logs, budgets, etc.)
+  - `juicefs_*` schemas — per-user JuiceFS metadata (created at provisioning)
+  - `LiteLLM_*` — ~30 tables managed by LiteLLM
 
-### Daytona Sandbox (per-user)
-- Image: `node:20-slim`, 2 CPU, 2GB RAM, 5GB disk
-- Auto-provision: create LiteLLM virtual key → create sandbox → clone repo → npm install → start gateway
-- Gateway port: 18800
-- Signed URL: 24h TTL, auto-refresh 1h before expiry, retry on 401
-- Auto-archive after 7 days of inactivity
+### Fly.io Sandbox (per-user)
+- Pre-baked Docker image: Node.js 20 + JuiceFS + esbuild bundle (10.5MB)
+- Config: 1 shared CPU, 1GB RAM, region `iad`
+- `autostop=suspend` / `autostart=true` — memory snapshot resume in 1.5-4.5s
+- Gateway port: 18800, auth via `X-Gateway-Secret` header
+- Cold start: ~18s (dominated by JuiceFS mount 8s + V8 parse 6s)
+- Warm resume (from suspend): 1.5-4.5s
+
+### Persistent Storage (JuiceFS)
+- Self-hosted JuiceFS (open source, no dependency on juicefs.com)
+- Metadata: Supabase PostgreSQL (per-user schema isolation)
+- Data: AWS S3 `us-east-1` bucket `meios-juicefs` (per-user IAM isolation)
+- Mount point: `/persistent/` (SOUL.md, MEMORY.md, images/, collections.db backup)
+- See [persistent-storage.md](persistent-storage.md) for full details
+
+### Image Delivery
+- Storage: Cloudflare R2 via presigned URL upload
+- CDN: `images.meios.ai` (zero egress cost)
+- Sync: chokidar watches workspace → auto-upload to R2 via gateway presigned URLs
+- Generation: Google Gemini native image gen (Nano Banana 2 / Pro)
+- See [image-support.md](image-support.md) and [cdn-image-delivery.md](cdn-image-delivery.md)
 
 ### meios Server (`server/`, runs inside sandbox)
-- Repo: [supermeio/xiaozhuo-meios-pi](https://github.com/supermeio/xiaozhuo-meios-pi)
 - Built on [pi-mono](https://github.com/badlogic/pi-mono) (pi-ai + pi-coding-agent)
-- Primary model: Gemini 3.1 Flash Lite via OpenAI format
-- Claude available via Anthropic native pass-through (for coding tasks)
+- Primary model: Kimi K2.5 (see [model-selection.md](model-selection.md))
+- Bundled with esbuild into single 10.5MB file (all JS deps inlined)
+- SQLite collections DB on local ephemeral disk (async backup to JuiceFS)
+- Tools: coding tools (read, write, edit, bash) + domain-specific tools
+- Cron: periodic tasks (wardrobe review, heartbeat)
 - Unified response envelope: `{ ok, data, error }`
-- Tools: coding tools (read, write, edit, bash) + wardrobe tools
 
 ## Request Flows
 
@@ -134,36 +140,25 @@ meios is a lightweight vertical AI agent platform for wardrobe/outfit assistance
 iOS → api.meios.ai (Cloudflare)
     → Auth Gateway (Cloud Run)
         → Verify JWT via JWKS
-        → Lookup sandbox signed URL (auto-provision if new user)
-        → Proxy to Daytona sandbox
-            → meios gateway → pi-agent
-        ← { ok, data: { reply, sessionId } }
+        → Lookup Fly Machine for user (auto-provision if new)
+        → Proxy to Fly.io sandbox (X-Gateway-Secret auth)
+            → meios gateway → pi-agent → Kimi K2.5
+        ← SSE stream: text-delta, tool-start, tool-end, image, done
     ← Response to iOS
 ```
 
-### LLM call from sandbox (OpenAI format — primary path)
+### LLM call from sandbox
 ```
-pi-agent: getModel('openai', 'gemini-3.1-flash-lite-preview')
+pi-agent (in sandbox)
     → POST ${OPENAI_BASE_URL}/chat/completions
-    → Edge Function (thin relay)
-    → LiteLLM /chat/completions
+    → LiteLLM Proxy (Cloud Run, direct — no Edge Function relay)
         → validate virtual key, check rate limit + budget
-        → translate OpenAI → Gemini native format
-        → POST generativelanguage.googleapis.com
-    ← translate Gemini → OpenAI response
-    ← { choices, usage }
+        → route to provider (Moonshot/Kimi, Anthropic, etc.)
+    ← response
 ```
 
-### LLM call from sandbox (Anthropic native — for Claude)
-```
-pi-agent: getModel('anthropic', 'claude-haiku-4-5')
-    → POST ${ANTHROPIC_BASE_URL}/v1/messages
-    → Edge Function (thin relay, forwards anthropic-version header)
-    → LiteLLM /anthropic/v1/messages (pass-through, no translation)
-        → validate virtual key, check rate limit + budget
-        → POST api.anthropic.com/v1/messages (native format)
-    ← Anthropic response (native, tool_use blocks preserved)
-```
+Note: The Supabase Edge Function relay was needed for Daytona (network whitelist).
+Fly.io has no network restrictions, so sandboxes connect to LiteLLM directly.
 
 ## API Endpoints
 
@@ -176,95 +171,117 @@ pi-agent: getModel('anthropic', 'claude-haiku-4-5')
 | `GET` | `/api/v1/keys` | JWT/Key | List API keys |
 | `DELETE` | `/api/v1/keys/:id` | JWT/Key | Revoke API key |
 | `GET` | `/api/v1/sandbox/url` | JWT/Key | Get sandbox direct access URL |
+| `POST` | `/internal/v1/sync/presign` | Machine Secret | Presign R2 upload URL |
+| `GET` | `/internal/v1/sync/list` | Machine Secret | List R2 objects |
+| `DELETE` | `/internal/v1/sync/object` | Machine Secret | Delete R2 object |
 | `*` | `/*` | JWT/Key | Proxy to sandbox |
 
-Auth supports Supabase JWT or meios API key (`meios_` prefix). See [AGENTS.md](../AGENTS.md) for agent integration guide.
-
-OpenAPI spec: [openapi.yaml](../openapi.yaml)
-
-### Sandbox (port 18800, via Gateway or direct URL)
+### Sandbox (port 18800, via Gateway)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/chat` | Send a message |
-| `GET` | `/health` | Health check |
+| `POST` | `/chat` | Send a message (supports SSE streaming) |
+| `GET` | `/health` | Health check (available before workspace init) |
 | `GET` | `/sessions` | List sessions |
 | `GET` | `/sessions/:id/messages` | Get session messages |
 | `DELETE` | `/sessions/:id` | Delete a session |
 | `GET` | `/closet` | Get wardrobe data |
-| `GET` | `/cron` | Cron tasks |
+| `GET` | `/images` | List all registered images |
+| `GET` | `/collections` | List image collections |
+| `POST` | `/collections` | Create collection |
+| `GET` | `/collections/:id` | Get collection with images |
+| `DELETE` | `/collections/:id` | Delete collection |
+| `POST` | `/collections/:id/images` | Add image to collection |
+| `DELETE` | `/collections/:id/images/:imgId` | Remove image from collection |
+| `GET` | `/fs` | List workspace directory |
+| `GET` | `/files/*` | Serve workspace files |
+| `PUT` | `/files/*` | Write workspace files |
+| `GET` | `/cron` | List cron tasks |
 
 ## Environment Variables
 
 ### Auth Gateway (Cloud Run)
-| Variable | Source | Description |
-|----------|--------|-------------|
-| `SUPABASE_URL` | env | Supabase project URL |
-| `SUPABASE_SECRET_KEY` | secret | Supabase secret key |
-| `DAYTONA_API_KEY` | secret | Daytona SDK API key |
-| `DAYTONA_API_URL` | env | Daytona API endpoint |
-| `LITELLM_MASTER_KEY` | secret | LiteLLM admin key (for `/key/generate`) |
-| `LITELLM_PROXY_URL` | env | LiteLLM Cloud Run URL |
+| Variable | Description |
+|----------|-------------|
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_SECRET_KEY` | Supabase secret key |
+| `SUPABASE_DB_HOST` | Direct PG host for JuiceFS provisioning |
+| `SUPABASE_DB_PASSWORD` | PG password |
+| `LITELLM_MASTER_KEY` | LiteLLM admin key |
+| `LITELLM_PROXY_URL` | LiteLLM Cloud Run URL |
+| `FLYIO_API_TOKEN` | Fly.io API token |
+| `FLYIO_APP_NAME` | Fly app name (`meios-sandbox-test`) |
+| `FLYIO_REGION` | Fly region (`iad`) |
+| `FLYIO_SANDBOX_IMAGE` | Docker image for new machines |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2 credentials for presigned URLs |
+| `R2_ENDPOINT` / `R2_BUCKET` / `R2_PUBLIC_URL` | R2 config |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS admin for JuiceFS IAM provisioning |
+| `JUICEFS_S3_BUCKET` / `JUICEFS_S3_REGION` | JuiceFS S3 config |
+| `GATEWAY_SECRET` | Shared secret for sandbox auth |
 
 ### LiteLLM Proxy (Cloud Run)
-| Variable | Source | Description |
-|----------|--------|-------------|
-| `LITELLM_MASTER_KEY` | secret | Admin key |
-| `DATABASE_URL` | secret | Supabase Postgres (pooler, port 5432) |
-| `ANTHROPIC_API_KEY` | secret | Real Anthropic key |
-| `GOOGLE_API_KEY` | secret | Real Google key |
-| `OPENAI_API_KEY` | secret | Real OpenAI key |
-| `KIMI_API_KEY` | secret | Real Moonshot key |
-| `UI_USERNAME` | env | Dashboard login |
-| `UI_PASSWORD` | env | Dashboard password |
+| Variable | Description |
+|----------|-------------|
+| `LITELLM_MASTER_KEY` | Admin key |
+| `DATABASE_URL` | Supabase Postgres (pooler, port 5432) |
+| `ANTHROPIC_API_KEY` | Real Anthropic key |
+| `GOOGLE_API_KEY` | Real Google key |
+| `OPENAI_API_KEY` | Real OpenAI key |
+| `KIMI_API_KEY` | Real Moonshot key |
 
-### Sandbox (Daytona env vars + `.env.token`)
-| Variable | Value | Description |
-|----------|-------|-------------|
-| `OPENAI_BASE_URL` | `${edgeFnUrl}/v1` | Primary LLM path (OpenAI format) |
-| `OPENAI_API_KEY` | LiteLLM virtual key | Shared across all providers |
-| `ANTHROPIC_BASE_URL` | `${edgeFnUrl}` | Claude native path (pass-through) |
-| `ANTHROPIC_API_KEY` | LiteLLM virtual key | Same key |
+### Sandbox (Fly.io Machine env vars)
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_BASE_URL` | LiteLLM proxy URL (all providers share same base) |
+| `ANTHROPIC_API_KEY` | LiteLLM virtual key |
+| `MEIOS_GATEWAY_URL` | Gateway URL for image sync |
+| `MEIOS_USER_ID` | User ID for R2 key layout |
+| `GATEWAY_SECRET` | Auth secret for gateway ↔ sandbox |
+| `JUICEFS_META_URL` | Per-user PG DSN for JuiceFS metadata |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Per-user S3 credentials for JuiceFS data |
+| `R2_PUBLIC_URL` | CDN base URL for image URLs |
 
 ## Domain
 
 - **meios.ai** — registered on Cloudflare, WHOIS privacy enabled
 - **api.meios.ai** — CNAME → `ghs.googlehosted.com`, Cloudflare Proxy enabled (orange cloud)
-- SSL: GCP managed certificate (Let's Encrypt) + Cloudflare edge TLS
+- **images.meios.ai** — CNAME → R2 public bucket (Cloudflare CDN)
+- SSL: GCP managed certificate + Cloudflare edge TLS
 
 ## Security
 
-See [security.md](security.md) for API key security design and Daytona network constraints.
+See [security.md](security.md) for detailed security analysis.
 
 ### Key security properties
 - **Real API keys never enter sandboxes** — only LiteLLM virtual keys
+- **Per-user isolation** — each sandbox has its own PG schema + S3 IAM credentials
+- **Credentials cleared after mount** — JuiceFS/S3 creds `unset` after FUSE mount
 - **Virtual key = sandbox scope** — rate limited (60 rpm), budgeted ($5/month), revocable
-- **Edge Function has no secrets** — just a network relay, LiteLLM validates everything
-- **LiteLLM Dashboard** — audit trail of all requests, spend per key/user/model
+- **LiteLLM Dashboard** — audit trail of all LLM requests
 
 ## Operations
 
-### Deploy LiteLLM
+See [deploy.md](deploy.md) for full deployment guide.
+
+### Quick reference
 ```bash
-cd litellm && gcloud run deploy litellm-proxy \
-  --project=xiaozhuo-meios-pi --region=us-central1 --source=. --port=4000
+# Gateway (Cloud Run)
+cd gateway && gcloud builds submit --tag $IMAGE && gcloud run deploy meios-gateway --image $IMAGE
+
+# Sandbox image (Fly.io)
+cd server && flyctl deploy --app meios-sandbox-test --dockerfile Dockerfile --build-only --push
+
+# LiteLLM (Cloud Run)
+cd litellm && gcloud run deploy litellm-proxy --source . --port 4000
 ```
 
-### Deploy Auth Gateway
-```bash
-cd gateway && gcloud run deploy meios-gateway \
-  --project=xiaozhuo-meios-pi --region=us-central1 --source=.
-```
+## Key Design Documents
 
-### Deploy Edge Function
-```bash
-cd gateway && supabase functions deploy llm-proxy \
-  --project-ref exyqukzhnjhbypakhlsp --no-verify-jwt
-```
-
-### LiteLLM schema migration
-Prisma binary can't reach Supabase pooler directly. Generate SQL then execute via node pg:
-```bash
-prisma migrate diff --from-empty --to-schema-datamodel schema.prisma --script > tables.sql
-node -e "const {Client}=require('pg'); ..." # execute SQL
-```
+| Document | Topic |
+|----------|-------|
+| [persistent-storage.md](persistent-storage.md) | JuiceFS architecture, S3 migration, per-user isolation |
+| [sandbox-startup-optimization.md](sandbox-startup-optimization.md) | Cold start optimization (50s → 18s → 1.5s suspend) |
+| [image-support.md](image-support.md) | Image generation, storage, delivery |
+| [model-selection.md](model-selection.md) | Why Kimi K2.5 |
+| [deploy.md](deploy.md) | Deployment procedures for all components |
+| [strategy.md](strategy.md) | Platform strategy and meio template system |

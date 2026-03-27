@@ -115,11 +115,14 @@ async function resolveGoogleSA(userId: string): Promise<{ sa: GoogleSAConfig; ca
     const cred = await getCredential(userId, 'google')
     if (cred) {
       try {
-        const plaintext = decrypt(
-          Buffer.from(cred.encrypted_data, 'base64'),
-          Buffer.from(cred.iv, 'base64'),
-          config.credentialEncryptionKey,
-        )
+        // Supabase returns bytea as \x-prefixed hex strings
+        const encData = cred.encrypted_data.startsWith('\\x')
+          ? Buffer.from(cred.encrypted_data.slice(2), 'hex')
+          : Buffer.from(cred.encrypted_data, 'base64')
+        const ivData = cred.iv.startsWith('\\x')
+          ? Buffer.from(cred.iv.slice(2), 'hex')
+          : Buffer.from(cred.iv, 'base64')
+        const plaintext = decrypt(encData, ivData, config.credentialEncryptionKey)
         const sa = JSON.parse(plaintext)
         return {
           sa: {

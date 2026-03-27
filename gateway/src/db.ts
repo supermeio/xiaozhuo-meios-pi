@@ -77,8 +77,8 @@ export interface UserCredential {
   id: string
   user_id: string
   service: string
-  encrypted_data: string   // base64-encoded ciphertext (Supabase returns bytea as base64)
-  iv: string               // base64-encoded IV
+  encrypted_data: string   // hex-encoded ciphertext (Supabase returns bytea as \x... hex)
+  iv: string               // hex-encoded IV
   label: string
   created_at: string
   updated_at: string
@@ -109,8 +109,8 @@ export async function upsertCredential(
       {
         user_id: userId,
         service,
-        encrypted_data: encryptedData.toString('base64'),
-        iv: iv.toString('base64'),
+        encrypted_data: '\\x' + encryptedData.toString('hex'),
+        iv: '\\x' + iv.toString('hex'),
         label,
         updated_at: new Date().toISOString(),
       },

@@ -5,7 +5,7 @@
 ## Identity
 
 - **Name:** meios
-- **Description:** AI wardrobe/outfit assistant platform. Each user gets an isolated sandbox with a personal AI agent.
+- **Description:** Platform for vertical AI agents (meios). Each meio is a specialized agent with its own personality, tools, and external service integrations — running in an isolated sandbox with persistent storage.
 - **Website:** https://meios.ai
 - **API Base URL:** https://api.meios.ai
 
@@ -25,141 +25,223 @@ API keys have the prefix `meios_`. They don't expire by default and can be revok
 
 ## Quick Start for Agents
 
-### 1. Get or create sandbox access
+### 1. Create an API key
 
 ```http
-GET /api/v1/sandbox/url
-Authorization: Bearer meios_<your_key>
+POST /api/v1/keys
+Authorization: Bearer <jwt>
+Content-Type: application/json
 
-→ {
-    "ok": true,
-    "data": {
-      "url": "https://...signed-url...",
-      "expires_at": "2026-03-14T12:00:00Z",
-      "port": 18800,
-      "endpoints": {
-        "chat": "/chat",
-        "health": "/health",
-        "sessions": "/sessions",
-        "closet": "/closet"
-      }
-    }
-  }
+{"name": "my-agent"}
+
+→ { "ok": true, "data": { "id": "...", "key": "meios_abc123...", ... } }
 ```
 
-### 2. Chat with the agent
+Store the key securely — it's returned only once.
 
-**Via Gateway (simple):**
+### 2. Chat with a meio
+
+All requests go through the gateway. The gateway auto-provisions a sandbox on first use.
+
 ```http
-POST https://api.meios.ai/chat
+POST /chat
 Authorization: Bearer meios_<your_key>
 Content-Type: application/json
 
 {
   "message": "What should I wear today?",
+  "meioType": "wardrobe",
   "sessionId": "optional-session-id"
 }
+
+→ { "ok": true, "data": { "reply": "...", "sessionId": "s-1234-abc" } }
 ```
 
-**Via Direct URL (low-latency):**
-```http
-POST <signed_url>/chat
-Content-Type: application/json
+**meioType** selects which meio to talk to. Available types depend on what the user has provisioned. Omit for the default meio.
 
-{
-  "message": "What should I wear today?",
-  "sessionId": "optional-session-id"
-}
+**Streaming**: Add `Accept: text/event-stream` header to get SSE streaming responses.
+
+### 3. List available meios
+
+```http
+GET /meios
+Authorization: Bearer meios_<your_key>
+
+→ { "ok": true, "data": { "meios": [
+    { "type": "default", "name": "Default", "hasSoul": true },
+    { "type": "wardrobe", "name": "穿搭助手", "hasSoul": true },
+    { "type": "reader", "name": "Reading Assistant", "hasSoul": true }
+  ] } }
 ```
 
-### 3. Manage sessions
+### 4. Provision a meio
 
 ```http
-GET <signed_url>/sessions                    # List sessions
-GET <signed_url>/sessions/:id/messages       # Get messages
-DELETE <signed_url>/sessions/:id             # Delete session
-```
-
-### 4. Access wardrobe
-
-```http
-GET <signed_url>/closet                      # Get wardrobe data
-```
-
-## API Key Management
-
-```http
-POST   /api/v1/keys              # Create a new API key (returns key once)
-GET    /api/v1/keys              # List keys (prefixes only)
-DELETE /api/v1/keys/:id          # Revoke a key
-```
-
-All key management endpoints require authentication (JWT or existing API key).
-
-## SSH Access
-
-For full terminal access to your sandbox:
-
-```http
-POST /api/v1/sandbox/ssh
+POST /api/v1/meios
 Authorization: Bearer meios_<your_key>
 Content-Type: application/json
 
-{"expires_in_minutes": 60}
+{ "template": "reader" }
 
 → {
     "ok": true,
     "data": {
-      "token": "abc123...",
-      "host": "ssh.app.daytona.io",
-      "command": "ssh abc123...@ssh.app.daytona.io",
-      "expires_in_minutes": 60
+      "id": "reader",
+      "name": "Reading Assistant",
+      "version": "0.1.0",
+      "installed": true,
+      "ready": false,
+      "missingCredentials": [
+        { "service": "google", "description": "Google Service Account key (JSON)", "required": true,
+          "setupUrl": "https://meios.ai/docs/setup/google-sa" }
+      ]
     }
   }
 ```
 
-Then connect: `ssh <token>@ssh.app.daytona.io`
+If `ready` is false, configure the missing credentials (step 5), then the meio is ready to use.
 
-## Rate Limits
+Available templates: `wardrobe`, `reader`.
 
-- **Gateway proxy:** No additional rate limit (passes through to sandbox)
-- **LLM calls (sandbox-internal):** 60 requests/min, $5/month budget (free tier)
-- **Signed URL:** Expires after 24h, call `GET /api/v1/sandbox/url` to refresh
+### 5. Manage credentials (for meios that need external APIs)
 
-## Architecture
+Some meios need external service credentials (e.g., reader needs Google Docs access). Credentials are stored encrypted and never exposed to the sandbox.
 
+```http
+PUT /api/v1/credentials/google
+Authorization: Bearer meios_<your_key>
+Content-Type: application/json
+
+{ "credential": { <service-account-key.json contents> }, "label": "My Google SA" }
 ```
-Agent → api.meios.ai (Gateway) → Daytona Sandbox (per-user)
-  or
-Agent → GET /api/v1/sandbox/url → Direct to Sandbox (signed URL)
-```
 
-Each sandbox runs an isolated AI agent with:
-- Chat capabilities (wardrobe/outfit assistance)
-- Coding tools (read, write, edit, bash)
-- Wardrobe tools (closet management)
-- LLM access via LiteLLM (rate-limited, budget-controlled)
+**Security**: Never paste credentials into chat. Use the credentials API directly.
+
+## API Reference
+
+### Gateway Endpoints (api.meios.ai)
+
+#### Health
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/ping` | None | Gateway health check |
+
+#### API Keys
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/v1/keys` | Bearer | Create API key (returns full key once) |
+| GET | `/api/v1/keys` | Bearer | List keys (prefixes only) |
+| DELETE | `/api/v1/keys/:id` | Bearer | Revoke key |
+
+#### Credentials
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| PUT | `/api/v1/credentials/:service` | Bearer | Store encrypted credential |
+| GET | `/api/v1/credentials` | Bearer | List credentials (metadata only) |
+| DELETE | `/api/v1/credentials/:service` | Bearer | Remove credential |
+
+#### Meio Provisioning
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/v1/meios` | Bearer | Provision a meio from template |
+| GET | `/api/v1/meios` | Bearer | List provisioned meios |
+| DELETE | `/api/v1/meios/:type` | Bearer | Remove a meio |
+
+#### Sandbox
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/v1/sandbox/url` | Bearer | Get direct sandbox URL (auto-provisions) |
+
+### Sandbox Endpoints (proxied through gateway)
+
+All sandbox endpoints are accessible via `https://api.meios.ai/<path>` — the gateway proxies to the user's sandbox.
+
+#### Chat & Sessions
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/chat` | Bearer | Send message. Body: `{ message, meioType?, sessionId? }` |
+| GET | `/meios` | Bearer | List available meio types |
+| GET | `/sessions` | Bearer | List sessions with previews |
+| GET | `/sessions/:id/messages` | Bearer | Get session message history |
+| DELETE | `/sessions/:id` | Bearer | Delete session |
+
+#### Images & Collections
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/images` | Bearer | List all registered images |
+| GET | `/collections` | Bearer | List collections with cover images |
+| POST | `/collections` | Bearer | Create collection. Body: `{ name, description? }` |
+| GET | `/collections/:id` | Bearer | Get collection + images |
+| DELETE | `/collections/:id` | Bearer | Delete collection |
+| POST | `/collections/:id/images` | Bearer | Add image. Body: `{ imagePath }` |
+| DELETE | `/collections/:id/images/:imgId` | Bearer | Remove image from collection |
+
+#### Wardrobe
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/closet` | Bearer | List wardrobe items |
+
+#### File System
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/fs?path=<dir>` | Bearer | List directory contents |
+| GET | `/files/<path>` | Bearer | Read/download file |
+| PUT | `/files/<path>` | Bearer | Write/update file (max 512 KB) |
+
+#### System
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | None | Sandbox health check |
+| GET | `/cron` | Bearer | List cron tasks |
+
+## Meio Types
+
+A meio type determines which personality (SOUL.md) and tools the agent uses.
+
+| Type | Description | Custom Tools | Needs Credentials |
+|------|-------------|-------------|-------------------|
+| `default` | General-purpose assistant | None (coding tools only) | No |
+| `wardrobe` | Closet management + outfit generation | 9 wardrobe tools | No |
+| `reader` | Web article summarization → Google Docs | None (coding tools only) | Yes (Google SA) |
+
+Pass `meioType` in the `/chat` request body to select a meio. Each meio has its own personality but shares the user's session history and memory.
 
 ## Response Format
 
 All endpoints return:
 ```json
-{
-  "ok": true,
-  "data": { ... }
-}
+{ "ok": true, "data": { ... } }
 ```
 
-Or on error:
+On error:
 ```json
-{
-  "ok": false,
-  "error": "Human-readable error message"
-}
+{ "ok": false, "error": "Human-readable error message" }
 ```
 
-## Source Code
+## Architecture
 
-- Repository: https://github.com/supermeio/xiaozhuo-meios-pi
-- License: See repository
-- Docs: `docs/` directory (architecture, security, model selection, setup)
+```
+Agent → api.meios.ai (Gateway, Cloud Run)
+  ├─ Auth (JWT / API Key)
+  ├─ Credential storage (AES-256-GCM encrypted)
+  ├─ Proxy → Fly.io Sandbox (per-user, isolated)
+  │    ├─ AI Agent (multi-meio: wardrobe, reader, etc.)
+  │    ├─ Coding tools (read, write, edit, bash)
+  │    ├─ Custom tools (per meio type)
+  │    ├─ Persistent storage (JuiceFS)
+  │    └─ LLM access via LiteLLM
+  └─ Credential proxy (sandbox → external APIs)
+```
+
+## Rate Limits
+
+- **Gateway proxy:** No additional rate limit
+- **LLM calls (sandbox-internal):** 60 req/min, $5/month budget (free tier)
+
+## Further Reading
+
+- OpenAPI spec: `openapi.yaml` in this repository
+- Architecture: `docs/architecture.md`
+- Security: `docs/security.md`
+- Meio template spec: `docs/meio-json-spec.md`
+- Source: https://github.com/supermeio/xiaozhuo-meios-pi

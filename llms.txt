@@ -1,6 +1,6 @@
 # meios
 
-> AI wardrobe/outfit assistant platform. Each user gets an isolated sandbox with a personal AI agent.
+> Platform for vertical AI agents (meios). Each meio is a specialized agent with its own personality, tools, and external service integrations — running in an isolated sandbox with persistent storage.
 
 ## API
 
@@ -12,26 +12,52 @@ OpenAPI spec: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/openapi.y
 
 1. Sign up at meios.ai (or via Supabase Auth API)
 2. Create API key: POST /api/v1/keys
-3. Get sandbox URL: GET /api/v1/sandbox/url
-4. Chat: POST {sandbox_url}/chat with {"message": "..."}
+3. Chat: POST /chat with {"message": "...", "meioType": "wardrobe"}
 
 ## Endpoints
 
+### Gateway (api.meios.ai)
+- GET /ping — Health check (no auth)
 - POST /api/v1/keys — Create API key
 - GET /api/v1/keys — List API keys
 - DELETE /api/v1/keys/:id — Revoke API key
-- GET /api/v1/sandbox/url — Get direct sandbox access URL
-- POST /api/v1/sandbox/ssh — Create SSH access token (ssh <token>@ssh.app.daytona.io)
-- POST /chat — Send message (via gateway or direct)
+- PUT /api/v1/credentials/:service — Store encrypted credential
+- GET /api/v1/credentials — List credentials (metadata only)
+- DELETE /api/v1/credentials/:service — Remove credential
+- POST /api/v1/meios — Provision a meio from template
+- GET /api/v1/meios — List provisioned meios
+- DELETE /api/v1/meios/:type — Remove a meio
+- GET /api/v1/sandbox/url — Get direct sandbox URL
+
+### Sandbox (proxied through gateway)
+- POST /chat — Send message (body: message, meioType?, sessionId?)
+- GET /meios — List available meio types
 - GET /sessions — List chat sessions
 - GET /sessions/:id/messages — Get session messages
 - DELETE /sessions/:id — Delete session
-- GET /closet — Get wardrobe data
-- GET /health — Health check
+- GET /images — List registered images
+- GET /collections — List image collections
+- POST /collections — Create collection
+- GET /collections/:id — Get collection + images
+- DELETE /collections/:id — Delete collection
+- POST /collections/:id/images — Add image to collection
+- DELETE /collections/:id/images/:imgId — Remove image from collection
+- GET /closet — List wardrobe items
+- GET /fs?path= — List directory
+- GET /files/* — Read file
+- PUT /files/* — Write file
+- GET /health — Sandbox health (no auth)
+- GET /cron — List cron tasks
+
+## Meio Types
+
+- default — General-purpose assistant
+- wardrobe — Closet management + outfit generation
+- reader — Web article summarization → Google Docs (needs Google SA credential)
 
 ## Docs
 
 - AGENTS.md: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/AGENTS.md
 - Architecture: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/docs/architecture.md
 - Security: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/docs/security.md
-- Skill: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/skills/meios-agent/SKILL.md
+- Meio template spec: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/docs/meio-json-spec.md

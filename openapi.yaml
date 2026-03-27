@@ -2,9 +2,10 @@ openapi: 3.1.0
 info:
   title: meios API
   description: |
-    AI wardrobe/outfit assistant platform API.
-    Each user gets an isolated sandbox with a personal AI agent.
-  version: 0.1.0
+    Platform for vertical AI agents (meios). Each meio is a specialized agent
+    with its own personality, tools, and external service integrations — running
+    in an isolated sandbox with persistent storage.
+  version: 0.2.0
   contact:
     url: https://github.com/supermeio/xiaozhuo-meios-pi
 
@@ -16,10 +17,13 @@ security:
   - bearerAuth: []
 
 paths:
+  # ── Gateway: Health ──
+
   /ping:
     get:
-      summary: Health check
+      summary: Gateway health check
       security: []
+      tags: [Gateway]
       responses:
         '200':
           description: OK
@@ -32,11 +36,14 @@ paths:
                   data:
                     type: object
                     properties:
-                      version: { type: string, example: '0.1.0' }
+                      version: { type: string, example: '0.2.0' }
+
+  # ── Gateway: API Keys ──
 
   /api/v1/keys:
     post:
       summary: Create API key
+      tags: [API Keys]
       description: |
         Generate a new API key for agent/developer access.
         The full key is returned only once — store it securely.
@@ -59,6 +66,7 @@ paths:
 
     get:
       summary: List API keys
+      tags: [API Keys]
       description: Returns key prefixes and metadata (never the full key).
       responses:
         '200':
@@ -77,6 +85,7 @@ paths:
   /api/v1/keys/{id}:
     delete:
       summary: Revoke API key
+      tags: [API Keys]
       parameters:
         - name: id
           in: path
@@ -92,40 +101,36 @@ paths:
                 properties:
                   ok: { type: boolean, example: true }
 
-  /api/v1/sandbox/url:
-    get:
-      summary: Get sandbox direct access URL
-      description: |
-        Returns a signed preview URL for direct sandbox access.
-        Auto-provisions a sandbox if the user doesn't have one.
-        URL expires after 24h — call again to refresh.
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SandboxUrl'
+  # ── Gateway: Credentials ──
 
-  /api/v1/sandbox/ssh:
-    post:
-      summary: Create SSH access token
+  /api/v1/credentials/{service}:
+    put:
+      summary: Store encrypted credential
+      tags: [Credentials]
       description: |
-        Creates a temporary SSH token for direct terminal access to the sandbox.
-        Connect with: ssh <token>@ssh.app.daytona.io
+        Upload a credential for an external service. The credential is encrypted
+        with AES-256-GCM in the gateway and stored in Supabase. The sandbox
+        never sees the raw credential — it flows through the credential proxy.
+      parameters:
+        - name: service
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-z0-9_]+$' }
+          description: 'Service identifier (e.g., "google")'
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
+              required: [credential]
               properties:
-                expires_in_minutes:
-                  type: integer
-                  default: 60
-                  description: Token expiry in minutes
+                credential:
+                  description: Service-specific credential (e.g., Google SA key JSON)
+                label: { type: string, description: 'Human-readable label' }
       responses:
         '200':
-          description: SSH token created
+          description: Credential stored
           content:
             application/json:
               schema:
@@ -135,17 +140,168 @@ paths:
                   data:
                     type: object
                     properties:
-                      token: { type: string, description: 'SSH token' }
-                      host: { type: string, example: 'ssh.app.daytona.io' }
-                      command: { type: string, description: 'Ready-to-use SSH command' }
-                      expires_in_minutes: { type: integer }
+                      service: { type: string }
+                      label: { type: string }
+                      created_at: { type: string, format: date-time }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    delete:
+      summary: Remove credential
+      tags: [Credentials]
+      parameters:
+        - name: service
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Credential removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+
+  /api/v1/credentials:
+    get:
+      summary: List credentials
+      tags: [Credentials]
+      description: Returns metadata only — never the encrypted credential data.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      credentials:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            service: { type: string }
+                            label: { type: string }
+                            created_at: { type: string, format: date-time }
+
+  # ── Gateway: Meio Provisioning ──
+
+  /api/v1/meios:
+    post:
+      summary: Provision a meio
+      tags: [Meios]
+      description: |
+        Install a meio from a built-in template. Writes meio.json and SOUL.md
+        to the sandbox's persistent storage. Auto-provisions sandbox if needed.
+        Returns missing credential info if the meio requires external services.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template]
+              properties:
+                template:
+                  type: string
+                  pattern: '^[a-z0-9][a-z0-9-]*$'
+                  description: 'Template ID (e.g., "wardrobe", "reader")'
+      responses:
+        '201':
+          description: Meio provisioned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/ProvisionedMeio'
         '404':
-          description: No active sandbox
+          description: Unknown template
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      summary: List provisioned meios
+      tags: [Meios]
+      description: Returns all meio types the user has installed.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      meios:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            type: { type: string }
+                            name: { type: string }
+                            hasSoul: { type: boolean }
+
+  /api/v1/meios/{type}:
+    delete:
+      summary: Remove a meio
+      tags: [Meios]
+      description: Soft-deletes a meio by writing a tombstone to meio.json.
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Meio removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { type: 'null' }
+
+  # ── Gateway: Sandbox ──
+
+  /api/v1/sandbox/url:
+    get:
+      summary: Get sandbox direct access URL
+      tags: [Sandbox]
+      description: |
+        Returns a signed URL for direct sandbox access.
+        Auto-provisions a Fly.io Machine if the user doesn't have one.
+        URL expires after 24h — call again to refresh.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxUrl'
+
+  # ── Sandbox: Chat & Sessions (proxied through gateway) ──
 
   /chat:
     post:
       summary: Send a message
-      description: Send a message to the user's AI agent (proxied to sandbox).
+      tags: [Chat]
+      description: |
+        Send a message to a meio. The gateway proxies to the user's sandbox.
+        Use meioType to select which meio to talk to.
+        Add Accept: text/event-stream header for SSE streaming.
       requestBody:
         required: true
         content:
@@ -155,6 +311,10 @@ paths:
               required: [message]
               properties:
                 message: { type: string, description: 'User message' }
+                meioType:
+                  type: string
+                  pattern: '^[a-z0-9-]+$'
+                  description: 'Meio type (e.g., "wardrobe", "reader"). Omit for default.'
                 sessionId: { type: string, description: 'Session ID (auto-generated if omitted)' }
       responses:
         '200':
@@ -169,11 +329,20 @@ paths:
                     type: object
                     properties:
                       reply: { type: string }
+                      content:
+                        type: array
+                        description: Parsed content blocks (text, tool_use, etc.)
                       sessionId: { type: string }
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream of agent events
 
-  /sessions:
+  /meios:
     get:
-      summary: List sessions
+      summary: List available meio types
+      tags: [Chat]
+      description: Returns all meio types the user has provisioned.
       responses:
         '200':
           description: OK
@@ -184,13 +353,42 @@ paths:
                 properties:
                   ok: { type: boolean }
                   data:
-                    type: array
-                    items:
-                      type: object
+                    type: object
+                    properties:
+                      meios:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            type: { type: string, example: 'wardrobe' }
+                            name: { type: string, example: '穿搭助手' }
+                            hasSoul: { type: boolean }
+
+  /sessions:
+    get:
+      summary: List sessions
+      tags: [Sessions]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      sessions:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/SessionSummary'
 
   /sessions/{id}/messages:
     get:
       summary: Get session messages
+      tags: [Sessions]
       parameters:
         - name: id
           in: path
@@ -199,10 +397,28 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      messages:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            role: { type: string, enum: [user, assistant] }
+                            text: { type: string }
+                            content: { type: array }
 
   /sessions/{id}:
     delete:
       summary: Delete session
+      tags: [Sessions]
       parameters:
         - name: id
           in: path
@@ -211,22 +427,330 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { type: 'null' }
 
-  /closet:
+  # ── Sandbox: Images & Collections ──
+
+  /images:
     get:
-      summary: Get wardrobe data
+      summary: List registered images
+      tags: [Images]
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      images:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Image'
+
+  /collections:
+    get:
+      summary: List collections
+      tags: [Collections]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      collections:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/CollectionSummary'
+
+    post:
+      summary: Create collection
+      tags: [Collections]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      collection:
+                        $ref: '#/components/schemas/CollectionSummary'
+
+  /collections/{id}:
+    get:
+      summary: Get collection with images
+      tags: [Collections]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      collection:
+                        $ref: '#/components/schemas/CollectionSummary'
+                      images:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Image'
+
+    delete:
+      summary: Delete collection
+      tags: [Collections]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: OK
+
+  /collections/{id}/images:
+    post:
+      summary: Add image to collection
+      tags: [Collections]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [imagePath]
+              properties:
+                imagePath: { type: string, description: 'Path relative to workspace' }
+      responses:
+        '200':
+          description: OK
+
+  /collections/{id}/images/{imgId}:
+    delete:
+      summary: Remove image from collection
+      tags: [Collections]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: imgId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: OK
+
+  # ── Sandbox: Wardrobe ──
+
+  /closet:
+    get:
+      summary: List wardrobe items
+      tags: [Wardrobe]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            name: { type: string }
+                            content: { type: string }
+
+  # ── Sandbox: File System ──
+
+  /fs:
+    get:
+      summary: List directory contents
+      tags: [File System]
+      parameters:
+        - name: path
+          in: query
+          schema: { type: string, default: '/' }
+          description: Directory path relative to workspace
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      path: { type: string }
+                      entries:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name: { type: string }
+                            type: { type: string, enum: [file, directory] }
+                            size: { type: integer }
+                            modifiedAt: { type: string, format: date-time }
+
+  /files/{path}:
+    get:
+      summary: Read/download file
+      tags: [File System]
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: File content
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: File not found
+
+    put:
+      summary: Write/update file
+      tags: [File System]
+      description: Max 512 KB. Creates parent directories automatically.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+          text/plain:
+            schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      path: { type: string }
+                      size: { type: integer }
+
+  # ── Sandbox: System ──
 
   /health:
     get:
       summary: Sandbox health check
-      description: Only accessible via direct sandbox URL.
+      tags: [System]
       security: []
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      uptime: { type: number }
+                      model: { type: string }
+                      version: { type: string }
+                      workspace: { type: string }
+                      workspaceReady: { type: boolean }
+                      activeSessions: { type: integer }
+
+  /cron:
+    get:
+      summary: List cron tasks
+      tags: [System]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      tasks:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            description: { type: string }
+                            enabled: { type: boolean }
+                            intervalMs: { type: integer }
+                            intervalHuman: { type: string }
+                            lastRun: { type: string, format: date-time }
 
 components:
   securitySchemes:
@@ -238,6 +762,26 @@ components:
         API keys are recommended for agent access.
 
   schemas:
+    ProvisionedMeio:
+      type: object
+      properties:
+        id: { type: string, example: 'reader' }
+        name: { type: string, example: 'Reading Assistant' }
+        version: { type: string, example: '0.1.0' }
+        description: { type: string }
+        installed: { type: boolean, example: true }
+        ready: { type: boolean, description: 'true if all required credentials are configured' }
+        missingCredentials:
+          type: array
+          description: 'Present only if ready=false'
+          items:
+            type: object
+            properties:
+              service: { type: string, example: 'google' }
+              description: { type: string }
+              required: { type: boolean }
+              setupUrl: { type: string }
+
     ApiKeyCreated:
       type: object
       properties:
@@ -268,7 +812,7 @@ components:
         data:
           type: object
           properties:
-            url: { type: string, description: 'Signed preview URL (24h TTL)' }
+            url: { type: string, description: 'Signed URL (24h TTL)' }
             expires_at: { type: string, format: date-time }
             port: { type: integer, example: 18800 }
             endpoints:
@@ -278,6 +822,37 @@ components:
                 health: { type: string, example: '/health' }
                 sessions: { type: string, example: '/sessions' }
                 closet: { type: string, example: '/closet' }
+
+    SessionSummary:
+      type: object
+      properties:
+        id: { type: string, example: 's-1711234567890-abc123' }
+        preview: { type: string, description: 'First 80 chars of first user message' }
+        messageCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        isActive: { type: boolean }
+
+    Image:
+      type: object
+      properties:
+        id: { type: integer }
+        path: { type: string }
+        filename: { type: string }
+        url: { type: string, description: 'CDN URL (images.meios.ai)' }
+        sizeBytes: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    CollectionSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string }
+        coverUrl: { type: string, description: 'CDN URL of most recent image' }
+        imageCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
 
   responses:
     Unauthorized:

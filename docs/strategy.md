@@ -303,11 +303,13 @@ POST /api/v1/provision
 3. ~~**Reader meio**~~ — ✅ Second meio type, e2e tested (summarize → Google Docs)
 4. ~~**Default meio decoupled**~~ — ✅ Generic default, wardrobe is optional type
 
+### Done (continued)
+5. ~~**meio.json spec**~~ — ✅ Formalized template contract (`docs/meio-json-spec.md`)
+6. ~~**AGENTS.md + llms.txt + OpenAPI spec**~~ — ✅ Agent discoverability docs updated
+7. ~~**Provisioning API**~~ — ✅ `POST /api/v1/meios { template }` with built-in templates
+
 ### Next
-5. **Meio onboarding flow** — meio self-guided credential setup + heavy agent path
-6. **meio.json spec** — formalize the template contract (secrets, allowedEndpoints)
-7. **Provisioning API** — `POST /api/v1/meios { template }` creates a meio of any type
-8. **AGENTS.md + llms.txt + OpenAPI spec** — agent discoverability
+8. **Meio onboarding flow** — meio self-guided credential setup + heavy agent path
 9. **Tools dynamic loading** — custom tools from `/persistent/` at runtime
 10. **Isolated sandbox mode** — 1 user = N Machines
 11. **BYOK** — user brings their own LLM key

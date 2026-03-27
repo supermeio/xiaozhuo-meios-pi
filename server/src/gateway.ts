@@ -299,11 +299,26 @@ function getSessionSummary(sessDir: string): { preview: string; messageCount: nu
   return { preview, messageCount: messages.length }
 }
 
+// ── Meio type resolution ─────────────────────────────────────
+
+/**
+ * Resolve SOUL.md path for a meio type.
+ * - meioType provided: /persistent/meios/{type}/SOUL.md
+ * - no meioType: /persistent/SOUL.md (legacy single-meio mode)
+ */
+function resolveSoulPath(meioType?: string): string {
+  if (meioType) {
+    const typed = resolve(WORKSPACE, 'meios', meioType, 'SOUL.md')
+    if (existsSync(typed)) return typed
+  }
+  return resolve(WORKSPACE, 'SOUL.md')
+}
+
 // ── System prompt ───────────────────────────────────────────
 
-function loadSystemPrompt(): string {
+function loadSystemPrompt(meioType?: string): string {
   const parts: string[] = []
-  const soulPath = resolve(WORKSPACE, 'SOUL.md')
+  const soulPath = resolveSoulPath(meioType)
   const memoryPath = resolve(WORKSPACE, 'MEMORY.md')
   if (existsSync(soulPath)) parts.push(readFileSync(soulPath, 'utf-8'))
   if (existsSync(memoryPath)) parts.push('---\n\n# 用户记忆\n\n' + readFileSync(memoryPath, 'utf-8'))
@@ -324,7 +339,17 @@ const sessionCache = new Map<string, any>()
 
 const SESSION_ID_RE = /^s-\d+-[a-z0-9]+$/
 
-async function getOrCreateSession(sessionId?: string) {
+/**
+ * Resolve custom tools for a meio type.
+ * - 'wardrobe' or undefined: wardrobe-specific tools
+ * - other types: coding tools only (bash/read/write/edit are sufficient)
+ */
+function resolveCustomTools(meioType?: string) {
+  if (meioType === 'wardrobe') return wardrobeTools
+  return []  // coding tools (read, write, edit, bash) are always included
+}
+
+async function getOrCreateSession(sessionId?: string, meioType?: string) {
   if (sessionId && !SESSION_ID_RE.test(sessionId)) {
     throw new Error('Invalid session ID')
   }
@@ -351,7 +376,7 @@ async function getOrCreateSession(sessionId?: string) {
     agentDir: AGENT_DIR,
     model,
     tools: codingTools,
-    customTools: wardrobeTools,
+    customTools: resolveCustomTools(meioType),
     thinkingLevel: 'minimal',
     sessionManager,
     resourceLoader,
@@ -370,8 +395,8 @@ interface ChatResult {
   content: ParsedContentBlock[]
 }
 
-async function chat(session: any, input: string): Promise<ChatResult> {
-  session.agent.setSystemPrompt(loadSystemPrompt())
+async function chat(session: any, input: string, meioType?: string): Promise<ChatResult> {
+  session.agent.setSystemPrompt(loadSystemPrompt(meioType))
 
   return new Promise<ChatResult>((resolve, reject) => {
     const textChunks: string[] = []
@@ -406,10 +431,10 @@ async function chat(session: any, input: string): Promise<ChatResult> {
 
 // ── SSE Streaming Chat ──────────────────────────────────────
 
-function chatStream(session: any, input: string, sessionId: string, res: ServerResponse): void {
+function chatStream(session: any, input: string, sessionId: string, res: ServerResponse, meioType?: string): void {
   const t0 = Date.now()
-  console.log(`[chatStream] loadSystemPrompt start`)
-  const systemPrompt = loadSystemPrompt()
+  console.log(`[chatStream] loadSystemPrompt start${meioType ? ` (meio: ${meioType})` : ''}`)
+  const systemPrompt = loadSystemPrompt(meioType)
   console.log(`[chatStream] loadSystemPrompt done (+${Date.now() - t0}ms)`)
 
   // Set system prompt on the agent (PromptOptions doesn't accept systemPrompt)
@@ -598,6 +623,35 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    // ── GET /meios — list available meio types ──
+    if (url.pathname === '/meios' && method === 'GET') {
+      const meios: { type: string; name: string; hasSoul: boolean }[] = []
+
+      // Check for typed meios in /persistent/meios/*/SOUL.md
+      const meiosDir = resolve(WORKSPACE, 'meios')
+      if (existsSync(meiosDir)) {
+        for (const entry of readdirSync(meiosDir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            const soulPath = resolve(meiosDir, entry.name, 'SOUL.md')
+            meios.push({
+              type: entry.name,
+              name: entry.name,
+              hasSoul: existsSync(soulPath),
+            })
+          }
+        }
+      }
+
+      // Always include default (legacy root SOUL.md)
+      const rootSoul = resolve(WORKSPACE, 'SOUL.md')
+      if (existsSync(rootSoul)) {
+        meios.unshift({ type: 'default', name: 'default', hasSoul: true })
+      }
+
+      ok(res, { meios })
+      return
+    }
+
     // ── POST /chat ──
     if (url.pathname === '/chat' && method === 'POST') {
       // Wait for workspace init if still in progress
@@ -622,17 +676,23 @@ const server = createServer(async (req, res) => {
       }
 
       const body = JSON.parse(rawBody)
-      const { message, sessionId: reqSessionId } = body
+      const { message, sessionId: reqSessionId, meioType } = body
 
       if (!message || typeof message !== 'string') {
         fail(res, 'message is required', 400)
         return
       }
 
+      // Validate meioType if provided (alphanumeric + hyphens only)
+      if (meioType && (typeof meioType !== 'string' || !/^[a-z0-9-]+$/.test(meioType))) {
+        fail(res, 'invalid meioType', 400)
+        return
+      }
+
       let session: any, sessionId: string
       try {
-        console.log(`[chat] getOrCreateSession start (+${Date.now() - t0}ms)`);
-        ({ session, sessionId } = await getOrCreateSession(reqSessionId))
+        console.log(`[chat] getOrCreateSession start (+${Date.now() - t0}ms)${meioType ? ` meio=${meioType}` : ''}`);
+        ({ session, sessionId } = await getOrCreateSession(reqSessionId, meioType))
         console.log(`[chat] getOrCreateSession done (+${Date.now() - t0}ms)`)
       } catch (err: any) {
         fail(res, err.message, 400)
@@ -642,11 +702,11 @@ const server = createServer(async (req, res) => {
       // SSE streaming if client requests it
       const wantsSSE = req.headers.accept?.includes('text/event-stream')
       if (wantsSSE) {
-        chatStream(session, message, sessionId, res)
+        chatStream(session, message, sessionId, res, meioType)
         return
       }
 
-      const result = await chat(session, message)
+      const result = await chat(session, message, meioType)
       ok(res, { reply: result.reply, content: result.content, sessionId })
       return
     }

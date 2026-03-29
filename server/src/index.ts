@@ -7,7 +7,10 @@
  *   Interactive: node --import tsx src/index.ts
  */
 
+import { logger } from './log.js'
 import { createAgentSession, codingTools, type AgentSessionEvent } from '@mariozechner/pi-coding-agent'
+
+const log = logger.getSubLogger({ name: 'server' })
 import { getModel } from '@mariozechner/pi-ai'
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -45,8 +48,7 @@ function parseArgs() {
 async function main() {
   const { mode, message } = parseArgs()
 
-  console.log('🧥 meios wardrobe agent starting...')
-  console.log(`   workspace: ${WORKSPACE}`)
+  log.info('starting', { workspace: WORKSPACE })
 
   // Load .env.token (source of truth — overrides stale Daytona env vars)
   const envSearchPaths = [
@@ -102,8 +104,7 @@ async function main() {
   // Note: env vars kept — pi-ai reads keys lazily at prompt() time.
   // In sandbox, these are proxy tokens, not real API keys.
 
-  console.log(`   model: ${model.name} (${model.id})`)
-  console.log('')
+  log.info('model loaded', { model: model.name, id: model.id })
 
   const { session } = await createAgentSession({
     cwd: WORKSPACE,
@@ -180,7 +181,7 @@ async function main() {
       const reply = await chat(input)
       console.log(`\n小周> ${reply}`)
     } catch (err: any) {
-      console.error(`\n[错误] ${err.message ?? err}`)
+      log.error('chat error', { error: err.message ?? String(err) })
     }
     rl.prompt()
   })
@@ -192,6 +193,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Fatal:', err)
+  log.fatal('fatal error', { error: err.message ?? String(err), stack: err.stack })
   process.exit(1)
 })

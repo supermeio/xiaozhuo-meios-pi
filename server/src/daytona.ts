@@ -15,6 +15,9 @@
 import { Daytona, Image } from '@daytonaio/sdk'
 import { readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { logger } from './log.js'
+
+const log = logger.getSubLogger({ name: 'daytona' })
 
 // ── Config ──
 const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
@@ -41,7 +44,7 @@ if (!anthropicKey) throw new Error('No ANTHROPIC_API_KEY found')
 // ── Helpers ──
 function saveState(state: Record<string, any>) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
-  console.log(`[state] saved to ${STATE_FILE}`)
+  log.info('state saved', { path: STATE_FILE })
 }
 
 function loadState(): Record<string, any> | null {
@@ -49,7 +52,7 @@ function loadState(): Record<string, any> | null {
   return JSON.parse(readFileSync(STATE_FILE, 'utf-8'))
 }
 
-function log(msg: string) { console.log(`[daytona] ${msg}`) }
+// logger sub-logger `log` defined at top of file
 
 // ── Source files to upload ──
 function getSourceFiles(): Array<{ source: Buffer; destination: string }> {
@@ -77,7 +80,7 @@ function getSourceFiles(): Array<{ source: Buffer; destination: string }> {
 async function createSandbox() {
   const daytona = new Daytona()
 
-  log('creating sandbox with node:20-slim image...')
+  log.info('creating sandbox with node:20-slim image...')
   const sandbox = await daytona.create({
     image: Image.base('node:20-slim'),
     language: 'typescript',
@@ -97,24 +100,23 @@ async function createSandbox() {
     onSnapshotCreateLogs: (chunk) => process.stdout.write(chunk),
   })
 
-  log(`sandbox created: ${sandbox.id} (state: ${sandbox.state})`)
-  log(`  cpu: ${sandbox.cpu}, memory: ${sandbox.memory}GB, disk: ${sandbox.disk}GB`)
+  log.info('sandbox created', { id: sandbox.id, state: sandbox.state, cpu: sandbox.cpu, memory: sandbox.memory, disk: sandbox.disk })
 
   // Upload source files
-  log('uploading source files...')
+  log.info('uploading source files...')
   const files = getSourceFiles()
   await sandbox.fs.uploadFiles(files)
-  log(`uploaded ${files.length} files`)
+  log.info('uploaded files', { count: files.length })
 
   // Also upload auth.json
   await sandbox.fs.uploadFile(
     readFileSync(authPath),
     '/home/daytona/meios/.meios-agent/auth.json',
   )
-  log('uploaded auth.json')
+  log.info('uploaded auth.json')
 
   // Install dependencies
-  log('installing dependencies (npm install)...')
+  log.info('installing dependencies (npm install)...')
   const installResult = await sandbox.process.executeCommand(
     'cd /home/daytona/meios && npm install --production 2>&1',
     undefined,
@@ -122,19 +124,19 @@ async function createSandbox() {
     300, // 5 min timeout
   )
   if (installResult.exitCode !== 0) {
-    console.error('npm install failed:', installResult.result)
+    log.error('npm install failed', { output: installResult.result })
     throw new Error('npm install failed')
   }
-  log(`npm install done (exit ${installResult.exitCode})`)
+  log.info('npm install done', { exitCode: installResult.exitCode })
 
   // Start gateway in a background session
-  log('starting gateway...')
+  log.info('starting gateway...')
   await sandbox.process.createSession('gateway')
   const startResult = await sandbox.process.executeSessionCommand('gateway', {
     command: 'cd /home/daytona/meios && node --import tsx src/gateway.ts 2>&1',
     runAsync: true,
   })
-  log(`gateway session started (cmdId: ${startResult.cmdId})`)
+  log.info('gateway session started', { cmdId: startResult.cmdId })
 
   // Wait a moment then verify
   await new Promise(r => setTimeout(r, 5000))
@@ -142,12 +144,12 @@ async function createSandbox() {
   const healthCheck = await sandbox.process.executeCommand(
     'curl -s http://localhost:18800/health',
   )
-  log(`health check: ${healthCheck.result}`)
+  log.info('health check', { result: healthCheck.result })
 
   // Get preview link
   try {
     const preview = await sandbox.getPreviewLink(18800)
-    log(`preview URL: ${preview.url}`)
+    log.info('preview URL', { url: preview.url })
     saveState({
       sandboxId: sandbox.id,
       sandboxName: sandbox.name,
@@ -156,7 +158,7 @@ async function createSandbox() {
       createdAt: new Date().toISOString(),
     })
   } catch (e: any) {
-    log(`preview link not available: ${e.message}`)
+    log.warn('preview link not available', { error: e.message })
     saveState({
       sandboxId: sandbox.id,
       sandboxName: sandbox.name,
@@ -167,46 +169,46 @@ async function createSandbox() {
   // SSH access
   try {
     const ssh = await sandbox.createSshAccess(60 * 24) // 24 hour token
-    log(`SSH: ssh ${ssh.token}@ssh.app.daytona.io`)
+    log.info('SSH access', { command: `ssh ${ssh.token}@ssh.app.daytona.io` })
   } catch (e: any) {
-    log(`SSH access: ${e.message}`)
+    log.warn('SSH access not available', { error: e.message })
   }
 
-  log('deployment complete!')
+  log.info('deployment complete!')
 }
 
 async function status() {
   const state = loadState()
-  if (!state) { log('no sandbox found. Run: create'); return }
+  if (!state) { log.info('no sandbox found. Run: create'); return }
 
   const daytona = new Daytona()
   try {
     const sandbox = await daytona.get(state.sandboxId)
-    log(`sandbox: ${sandbox.id}`)
-    log(`  name: ${sandbox.name}`)
-    log(`  state: ${sandbox.state}`)
-    log(`  cpu: ${sandbox.cpu}, memory: ${sandbox.memory}GB, disk: ${sandbox.disk}GB`)
-    log(`  created: ${sandbox.createdAt}`)
+    log.info('sandbox status', {
+      id: sandbox.id, name: sandbox.name, state: sandbox.state,
+      cpu: sandbox.cpu, memory: sandbox.memory, disk: sandbox.disk,
+      created: sandbox.createdAt,
+    })
 
     if (sandbox.state === 'started') {
       const health = await sandbox.process.executeCommand('curl -s http://localhost:18800/health')
-      log(`  health: ${health.result}`)
+      log.info('health check', { result: health.result })
     }
   } catch (e: any) {
-    log(`error: ${e.message}`)
+    log.error('status check failed', { error: e.message })
   }
 }
 
 async function destroy() {
   const state = loadState()
-  if (!state) { log('no sandbox found'); return }
+  if (!state) { log.info('no sandbox found'); return }
 
   const daytona = new Daytona()
   const sandbox = await daytona.get(state.sandboxId)
-  log(`deleting sandbox ${sandbox.id}...`)
+  log.info('deleting sandbox', { id: sandbox.id })
   await sandbox.delete()
   writeFileSync(STATE_FILE, '{}')
-  log('sandbox deleted')
+  log.info('sandbox deleted')
 }
 
 // ── CLI ──
@@ -215,5 +217,5 @@ switch (cmd) {
   case 'create': await createSandbox(); break
   case 'status': await status(); break
   case 'destroy': await destroy(); break
-  default: console.log('Usage: daytona.ts [create|status|destroy]')
+  default: log.info('Usage: daytona.ts [create|status|destroy]')
 }

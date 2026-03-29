@@ -21,6 +21,9 @@
 import { watch } from 'chokidar'
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
+import { logger } from './log.js'
+
+const log = logger.getSubLogger({ name: 'sync' })
 
 // ── Config ──
 
@@ -175,7 +178,7 @@ async function reconcile(config: SyncConfig): Promise<{ uploaded: number; delete
       await uploadFile(config, relPath, fullPath)
       uploaded++
     } catch (err: any) {
-      console.error(`[sync] upload failed: ${relPath}`, err.message)
+      log.error('upload failed', { path: relPath, error: err.message })
     }
   }
 
@@ -186,7 +189,7 @@ async function reconcile(config: SyncConfig): Promise<{ uploaded: number; delete
         await deleteFile(config, key)
         deleted++
       } catch (err: any) {
-        console.error(`[sync] delete failed: ${key}`, err.message)
+        log.error('delete failed', { path: key, error: err.message })
       }
     }
   }
@@ -214,9 +217,9 @@ function startWatcher(config: SyncConfig): ReturnType<typeof watch> {
     const relPath = relative(config.workspacePath, filePath)
     try {
       await uploadFile(config, relPath, filePath)
-      console.log(`[sync] uploaded: ${relPath}`)
+      log.info('uploaded', { path: relPath })
     } catch (err: any) {
-      console.error(`[sync] upload failed: ${relPath}`, err.message)
+      log.error('upload failed', { path: relPath, error: err.message })
     }
   })
 
@@ -224,9 +227,9 @@ function startWatcher(config: SyncConfig): ReturnType<typeof watch> {
     const relPath = relative(config.workspacePath, filePath)
     try {
       await uploadFile(config, relPath, filePath)
-      console.log(`[sync] updated: ${relPath}`)
+      log.info('updated', { path: relPath })
     } catch (err: any) {
-      console.error(`[sync] update failed: ${relPath}`, err.message)
+      log.error('update failed', { path: relPath, error: err.message })
     }
   })
 
@@ -234,9 +237,9 @@ function startWatcher(config: SyncConfig): ReturnType<typeof watch> {
     const relPath = relative(config.workspacePath, filePath)
     try {
       await deleteFile(config, relPath)
-      console.log(`[sync] deleted: ${relPath}`)
+      log.info('deleted', { path: relPath })
     } catch (err: any) {
-      console.error(`[sync] delete failed: ${relPath}`, err.message)
+      log.error('delete failed', { path: relPath, error: err.message })
     }
   })
 
@@ -255,7 +258,7 @@ export async function initSync(workspacePath: string): Promise<{ stop: () => voi
   const userId = process.env.MEIOS_USER_ID
 
   if (!gatewayUrl || !machineSecret || !userId) {
-    console.log('[sync] Gateway URL or machine secret not available, file sync disabled')
+    log.info('gateway URL or machine secret not available, file sync disabled')
     return null
   }
 
@@ -270,17 +273,17 @@ export async function initSync(workspacePath: string): Promise<{ stop: () => voi
 
   // Start real-time watcher immediately (lightweight, no blocking)
   const watcher = startWatcher(config)
-  console.log(`[sync] watching ${config.watchDirs?.join(', ')} for changes`)
+  log.info('watching for changes', { dirs: config.watchDirs })
 
   // Defer reconcile to avoid competing with first request for CPU/IO.
   // The watcher catches any new changes in the meantime.
   setTimeout(async () => {
-    console.log('[sync] reconciling workspace → R2...')
+    log.info('reconciling workspace → R2...')
     try {
       const { uploaded, deleted } = await reconcile(config)
-      console.log(`[sync] reconcile done: ${uploaded} uploaded, ${deleted} deleted`)
+      log.info('reconcile done', { uploaded, deleted })
     } catch (err: any) {
-      console.error('[sync] reconcile failed:', err.message)
+      log.error('reconcile failed', { error: err.message })
     }
   }, 15_000)
 

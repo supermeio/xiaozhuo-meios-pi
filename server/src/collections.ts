@@ -14,6 +14,9 @@ import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { resolve, join, relative, extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { logger } from './log.js'
+
+const log = logger.getSubLogger({ name: 'collections' })
 
 // ── Types ──
 
@@ -111,7 +114,7 @@ export function initCollections(workspaceRoot: string): Database.Database {
 
   // Restore from JuiceFS if local doesn't exist (cold start after stop)
   if (!existsSync(localDbPath) && existsSync(_persistentDbPath)) {
-    console.log('[collections] restoring DB from JuiceFS...')
+    log.info('restoring DB from JuiceFS...')
     copyFileSync(_persistentDbPath, localDbPath)
     // Also copy WAL/SHM if they exist (unlikely but defensive)
     for (const suffix of ['-wal', '-shm']) {
@@ -135,12 +138,12 @@ function scheduleBackup() {
     try {
       // Use SQLite backup API for consistency (no partial writes)
       _db!.backup(_persistentDbPath).then(() => {
-        // console.log('[collections] backed up to JuiceFS')
+        // log.debug('backed up to JuiceFS')
       }).catch((err: any) => {
-        console.error('[collections] backup failed:', err.message)
+        log.error('backup failed', { error: err.message })
       })
     } catch (err: any) {
-      console.error('[collections] backup failed:', err.message)
+      log.error('backup failed', { error: err.message })
     }
   }, 5_000) // 5s debounce
 }

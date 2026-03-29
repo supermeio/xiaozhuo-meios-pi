@@ -159,7 +159,7 @@ async function resolveGitHubToken(userId: string): Promise<string | null> {
 
 interface ResolvedSandbox {
   url: string
-  machineId: string
+  machineId?: string
   machineSecret?: string
 }
 
@@ -216,7 +216,7 @@ interface ResolvedTemplate {
 async function resolveTemplate(
   body: any,
   userId: string,
-): Promise<{ template: ResolvedTemplate } | { error: string; status: number }> {
+): Promise<{ template: ResolvedTemplate } | { error: string; status: 400 | 404 | 422 }> {
 
   // Mode 1: Inline template
   if (body.inline && typeof body.inline === 'object') {

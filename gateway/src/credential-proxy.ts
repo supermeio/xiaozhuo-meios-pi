@@ -13,6 +13,9 @@ import { SignJWT, importPKCS8 } from 'jose'
 import { config } from './config.js'
 import { getCredential } from './db.js'
 import { decrypt } from './crypto.js'
+import { logger } from './log.js'
+
+const log = logger.getSubLogger({ name: 'credential-proxy' })
 
 // ── Allowlist ──
 
@@ -133,7 +136,7 @@ async function resolveGoogleSA(userId: string): Promise<{ sa: GoogleSAConfig; ca
           cacheKey: `${userId}:google`,
         }
       } catch (err: any) {
-        console.error(`[credential-proxy] failed to decrypt credential for user ${userId}:`, err.message)
+        log.error('failed to decrypt credential', { userId, error: err.message })
       }
     }
   }
@@ -197,7 +200,7 @@ export async function credentialProxy(c: Context) {
   try {
     accessToken = await getGoogleAccessToken(resolved.cacheKey, resolved.sa)
   } catch (err: any) {
-    console.error('[credential-proxy] token error:', err.message)
+    log.error('token error', { error: err.message })
     return c.json({ ok: false, error: 'Failed to obtain credentials' }, 502)
   }
 
@@ -236,7 +239,7 @@ export async function credentialProxy(c: Context) {
       data: { status: upstream.status, headers: responseHeaders, body: responseBody },
     })
   } catch (err: any) {
-    console.error('[credential-proxy] upstream error:', err.message)
+    log.error('upstream error', { error: err.message })
     return c.json({ ok: false, error: `Upstream request failed: ${err.message}` }, 502)
   }
 }

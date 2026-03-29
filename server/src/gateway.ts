@@ -24,6 +24,9 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { logger } from './log.js'
+
+const log = logger.getSubLogger({ name: 'gateway' })
 import { createAgentSession, codingTools, SessionManager, DefaultResourceLoader, SettingsManager } from '@mariozechner/pi-coding-agent'
 import { getModel } from '@mariozechner/pi-ai'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs'
@@ -157,21 +160,21 @@ const model = {
 let _workspaceReady = false
 function deferredInit() {
   const t0 = Date.now()
-  console.log('[init] deferred workspace init starting...')
+  log.info('deferred workspace init starting...')
 
   setWorkspaceRoot(WORKSPACE)
-  console.log(`[init] setWorkspaceRoot done (+${Date.now() - t0}ms)`)
+  log.info('setWorkspaceRoot done', { elapsed: Date.now() - t0 })
 
   initCron(WORKSPACE)
-  console.log(`[init] initCron done (+${Date.now() - t0}ms)`)
+  log.info('initCron done', { elapsed: Date.now() - t0 })
 
   initHeartbeat(WORKSPACE)
-  console.log(`[init] initHeartbeat done (+${Date.now() - t0}ms)`)
+  log.info('initHeartbeat done', { elapsed: Date.now() - t0 })
 
   _workspaceReady = true
-  console.log(`[init] workspace ready (+${Date.now() - t0}ms)`)
+  log.info('workspace ready', { elapsed: Date.now() - t0 })
 
-  initSync(WORKSPACE).catch(err => console.error('[sync] init error:', err.message))
+  initSync(WORKSPACE).catch(err => log.error('sync init error', { error: err.message }))
 }
 
 // ── Pre-create resource loader (skip all discovery to avoid slow JuiceFS scans) ──
@@ -203,8 +206,8 @@ const IS_DEV = process.env.NODE_ENV === 'development' || process.env.MEIOS_DEV =
 
 // Fail-closed: refuse to start without GATEWAY_SECRET in production
 if (!GATEWAY_SECRET && !IS_DEV) {
-  console.error('[FATAL] GATEWAY_SECRET is not set. Refusing to start without auth secret in production.')
-  console.error('  Set GATEWAY_SECRET, or set NODE_ENV=development / MEIOS_DEV=1 for local dev.')
+  log.fatal('GATEWAY_SECRET is not set — refusing to start without auth secret in production')
+  log.fatal('Set GATEWAY_SECRET, or set NODE_ENV=development / MEIOS_DEV=1 for local dev')
   process.exit(1)
 }
 
@@ -433,9 +436,9 @@ async function chat(session: any, input: string, meioType?: string): Promise<Cha
 
 function chatStream(session: any, input: string, sessionId: string, res: ServerResponse, meioType?: string): void {
   const t0 = Date.now()
-  console.log(`[chatStream] loadSystemPrompt start${meioType ? ` (meio: ${meioType})` : ''}`)
+  log.info('loadSystemPrompt start', { meioType })
   const systemPrompt = loadSystemPrompt(meioType)
-  console.log(`[chatStream] loadSystemPrompt done (+${Date.now() - t0}ms)`)
+  log.info('loadSystemPrompt done', { elapsed: Date.now() - t0 })
 
   // Set system prompt on the agent (PromptOptions doesn't accept systemPrompt)
   session.agent.setSystemPrompt(systemPrompt)
@@ -460,28 +463,28 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
 
   // Send session ID immediately
   sendSSE({ type: 'session', sessionId })
-  console.log(`[chatStream] session.prompt() about to call (+${Date.now() - t0}ms)`)
+  log.info('session.prompt() about to call', { elapsed: Date.now() - t0 })
 
   let firstEventLogged = false
   let firstTextDelta = false
   const unsub = session.subscribe((event: AgentEvent) => {
     if (!firstEventLogged) {
-      console.log(`[chatStream] first agent event: ${event.type} (+${Date.now() - t0}ms)`)
+      log.info('first agent event', { type: event.type, elapsed: Date.now() - t0 })
       firstEventLogged = true
     }
     // Log key lifecycle events for timing analysis
     if (event.type === 'message_start') {
       const role = (event as any).message?.role
-      console.log(`[chatStream] message_start role=${role} (+${Date.now() - t0}ms)`)
+      log.info('message_start', { role, elapsed: Date.now() - t0 })
     }
     if (event.type === 'turn_start') {
-      console.log(`[chatStream] turn_start (+${Date.now() - t0}ms)`)
+      log.info('turn_start', { elapsed: Date.now() - t0 })
     }
     if (event.type === 'message_update') {
       const evt = (event as any).assistantMessageEvent
       if (evt?.type === 'text_delta' && evt.delta) {
         if (!firstTextDelta) {
-          console.log(`[chatStream] first text_delta (+${Date.now() - t0}ms)`)
+          log.info('first text_delta', { elapsed: Date.now() - t0 })
           firstTextDelta = true
         }
         textChunks.push(evt.delta)
@@ -536,7 +539,7 @@ function chatStream(session: any, input: string, sessionId: string, res: ServerR
                     new Promise((_, reject) => setTimeout(() => reject(new Error('upload timeout')), 30_000)),
                   ])
                 } catch (uploadErr: any) {
-                  console.error(`[chatStream] ensureUploaded failed: ${uploadErr.message}, falling back to /files/`)
+                  log.error('ensureUploaded failed, falling back to /files/', { error: (uploadErr as Error).message })
                 }
                 const imageId = `img-${filePath.replace(/[^a-z0-9]/gi, '-')}`
                 sendSSE({
@@ -666,7 +669,7 @@ const server = createServer(async (req, res) => {
         }
       }
       const t0 = Date.now()
-      console.log(`[chat] request received`)
+      log.info('chat request received')
       let rawBody: string
       try {
         rawBody = await readBody(req)
@@ -691,9 +694,9 @@ const server = createServer(async (req, res) => {
 
       let session: any, sessionId: string
       try {
-        console.log(`[chat] getOrCreateSession start (+${Date.now() - t0}ms)${meioType ? ` meio=${meioType}` : ''}`);
+        log.info('getOrCreateSession start', { elapsed: Date.now() - t0, meioType });
         ({ session, sessionId } = await getOrCreateSession(reqSessionId, meioType))
-        console.log(`[chat] getOrCreateSession done (+${Date.now() - t0}ms)`)
+        log.info('getOrCreateSession done', { elapsed: Date.now() - t0 })
       } catch (err: any) {
         fail(res, err.message, 400)
         return
@@ -1042,28 +1045,18 @@ const server = createServer(async (req, res) => {
     // ── 404 ──
     fail(res, 'not found', 404)
   } catch (err: any) {
-    console.error('[error]', err)
+    log.error('request error', { error: err.message, stack: err.stack })
     fail(res, err.message ?? 'internal error', 500)
   }
 })
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`meios gateway running`)
-  console.log(`   http://0.0.0.0:${PORT}`)
-  console.log(`   model: ${model.name} (${model.id})`)
-  console.log(`   workspace: ${WORKSPACE}`)
-  console.log(`   version: ${VERSION}`)
-  console.log('')
-  console.log(`Endpoints:`)
-  console.log(`   GET    /health`)
-  console.log(`   POST   /chat                  { message, sessionId? }`)
-  console.log(`   GET    /sessions`)
-  console.log(`   GET    /sessions/:id/messages`)
-  console.log(`   DELETE /sessions/:id`)
-  console.log(`   GET    /closet`)
-  console.log(`   GET    /files/*               workspace files`)
-  console.log(`   GET    /cron`)
-  console.log('')
+  log.info('meios gateway running', {
+    url: `http://0.0.0.0:${PORT}`,
+    model: `${model.name} (${model.id})`,
+    workspace: WORKSPACE,
+    version: VERSION,
+  })
 
   // Start JuiceFS-touching init in next tick (non-blocking)
   setImmediate(deferredInit)

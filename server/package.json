@@ -20,6 +20,7 @@
     "@sinclair/typebox": "^0.34.0",
     "better-sqlite3": "^12.8.0",
     "chokidar": "^5.0.0",
+    "tslog": "^4.10.2",
     "tsx": "^4.19.0"
   },
   "devDependencies": {

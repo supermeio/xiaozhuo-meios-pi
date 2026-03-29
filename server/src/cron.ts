@@ -6,6 +6,9 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { logger } from './log.js'
+
+const log = logger.getSubLogger({ name: 'cron' })
 
 export interface CronTask {
   id: string
@@ -71,9 +74,9 @@ function startTask(id: string) {
       const result = await task.handler()
       task.lastRun = Date.now()
       saveState()
-      if (result) console.log(`[cron:${id}] ${result}`)
+      if (result) log.info(result, { taskId: id })
     } catch (err: any) {
-      console.error(`[cron:${id}] error:`, err.message)
+      log.error('task error', { taskId: id, error: err.message })
     } finally {
       running = false
     }

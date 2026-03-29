@@ -1,4 +1,7 @@
+import { logger } from './log.js'
 import { Type, type Static, type TSchema } from '@sinclair/typebox'
+
+const log = logger.getSubLogger({ name: 'tools' })
 import type { AgentToolResult } from '@mariozechner/pi-agent-core'
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { Theme } from '@mariozechner/pi-coding-agent'
@@ -211,7 +214,7 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
   description: '使用 AI 生成图片。适用于生成穿搭效果图、服装展示图等。图片会保存到 workspace 目录。默认使用 flash 模型 + 1K 分辨率。仅当用户明确要求时才改 model/imageSize。',
   parameters: GenerateImageParams,
   async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-    console.log('[generate_image] TOOL CALLED with params:', JSON.stringify(params))
+    log.info('generate_image called', { params })
     const filename = params.filename as string
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(filename) || filename.length > 80) {
       return textResult('Invalid filename. Use lowercase letters, numbers, hyphens, and dots only.', '')
@@ -265,7 +268,7 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
 
     const result = await response.json() as any
 
-    console.log('[generate_image] API response status:', response.status)
+    log.info('API response', { status: response.status })
 
     // Extract image from LiteLLM /chat/completions response
     // Supports: message.content[] with image_url (data URI) and text parts
@@ -306,12 +309,12 @@ export const generateImageTool: ToolDefinition<typeof GenerateImageParams, strin
       }
     }
 
-    console.log('[generate_image] imageData found:', !!imageData, 'textContent:', textContent.slice(0, 50))
+    log.info('image extraction result', { hasImage: !!imageData, textPreview: textContent.slice(0, 50) })
 
     if (!imageData) {
       return textResult(`No image generated. Response: ${JSON.stringify(result).slice(0, 300)}`, '')
     }
-    console.log('[generate_image] image extracted, size:', imageData.length, 'mime:', imageMimeType)
+    log.info('image extracted', { size: imageData.length, mime: imageMimeType })
 
     const ext = imageMimeType.includes('webp') ? 'webp' : imageMimeType.includes('jpeg') ? 'jpg' : 'png'
     const imageBuffer = Buffer.from(imageData, 'base64')

@@ -76,32 +76,50 @@ Authorization: Bearer meios_<your_key>
 
 ### 4. Provision a meio
 
+Two ways to provision:
+
+**From GitHub repo:**
 ```http
 POST /api/v1/meios
-Authorization: Bearer meios_<your_key>
-Content-Type: application/json
-
-{ "template": "reader" }
-
-→ {
-    "ok": true,
-    "data": {
-      "id": "reader",
-      "name": "Reading Assistant",
-      "version": "0.1.0",
-      "installed": true,
-      "ready": false,
-      "missingCredentials": [
-        { "service": "google", "description": "Google Service Account key (JSON)", "required": true,
-          "setupUrl": "https://meios.ai/docs/setup/google-sa" }
-      ]
-    }
-  }
+{ "repo": "https://github.com/supermeio/xiaozhuo-meios-pi", "path": "templates/wardrobe" }
+```
+For private repos, first store a GitHub token:
+```http
+PUT /api/v1/credentials/github
+{ "credential": { "token": "ghp_..." } }
 ```
 
-If `ready` is false, configure the missing credentials (step 5), then the meio is ready to use.
+**From inline definition:**
+```http
+POST /api/v1/meios
+{
+  "inline": {
+    "meio.json": { "id": "my-meio", "name": "My Meio", "version": "0.1.0" },
+    "SOUL.md": "# My Meio\nYou are..."
+  }
+}
+```
 
-Available templates: `wardrobe`, `reader`.
+**Response** (both modes):
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "wardrobe",
+    "name": "穿搭助手",
+    "version": "0.1.0",
+    "source": "repo",
+    "installed": true,
+    "ready": true
+  }
+}
+```
+
+If `ready` is false, the response includes `missingCredentials` with setup instructions. Configure the missing credentials (step 5), then the meio is ready to use.
+
+**Known meio templates:**
+- Wardrobe: `{ "repo": "https://github.com/supermeio/xiaozhuo-meios-pi", "path": "templates/wardrobe" }` (public)
+- Reader: `{ "repo": "https://github.com/beijingrong/my-meios", "path": "reader" }` (private, needs GitHub token)
 
 ### 5. Manage credentials (for meios that need external APIs)
 

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://meios.ai/schemas/meio.json",
+  "id": "wardrobe",
+  "name": "穿搭助手",
+  "version": "0.1.0",
+  "description": "Closet management and outfit generation",
+  "tools": {
+    "builtin": ["coding"],
+    "custom": "tools.ts"
+  },
+  "secrets": {},
+  "allowedEndpoints": [],
+  "storage": {
+    "directories": ["closet", "looks"]
+  }
+}

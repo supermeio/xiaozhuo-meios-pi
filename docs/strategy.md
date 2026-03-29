@@ -306,10 +306,10 @@ POST /api/v1/provision
 ### Done (continued)
 5. ~~**meio.json spec**~~ — ✅ Formalized template contract (`docs/meio-json-spec.md`)
 6. ~~**AGENTS.md + llms.txt + OpenAPI spec**~~ — ✅ Agent discoverability docs updated
-7. ~~**Provisioning API**~~ — ✅ `POST /api/v1/meios { template }` with built-in templates
+7. ~~**Provisioning API**~~ — ✅ `POST /api/v1/meios` — builtin, inline, and GitHub repo templates
+8. ~~**Meio onboarding flow**~~ — ✅ Heavy agent reads AGENTS.md, provisions via API, prompts for credentials
 
 ### Next
-8. **Meio onboarding flow** — meio self-guided credential setup + heavy agent path
 9. **Tools dynamic loading** — custom tools from `/persistent/` at runtime
 10. **Isolated sandbox mode** — 1 user = N Machines
 11. **BYOK** — user brings their own LLM key

@@ -197,21 +197,41 @@ paths:
       summary: Provision a meio
       tags: [Meios]
       description: |
-        Install a meio from a built-in template. Writes meio.json and SOUL.md
-        to the sandbox's persistent storage. Auto-provisions sandbox if needed.
-        Returns missing credential info if the meio requires external services.
+        Install a meio from a GitHub repo or inline definition.
+        Writes meio.json and SOUL.md to the sandbox's persistent storage.
+        Auto-provisions sandbox if needed. Returns missing credential info
+        if the meio requires external services.
+
+        Two modes (provide exactly one):
+        - `inline`: { "meio.json": {...}, "SOUL.md": "..." }
+        - `repo`: GitHub URL + optional branch/path
+
+        For private repos, first store a GitHub token via
+        PUT /api/v1/credentials/github { credential: { token: "ghp_..." } }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [template]
               properties:
-                template:
+                inline:
+                  type: object
+                  description: 'Inline template with meio.json and optional SOUL.md'
+                  properties:
+                    meio.json: { type: object, description: 'MeioManifest object' }
+                    SOUL.md: { type: string, description: 'Personality definition' }
+                repo:
                   type: string
-                  pattern: '^[a-z0-9][a-z0-9-]*$'
-                  description: 'Template ID (e.g., "wardrobe", "reader")'
+                  description: 'GitHub repo URL (https://github.com/owner/repo)'
+                branch:
+                  type: string
+                  default: main
+                  description: 'Git branch (used with repo mode)'
+                path:
+                  type: string
+                  default: /
+                  description: 'Subdirectory within repo (used with repo mode)'
       responses:
         '201':
           description: Meio provisioned
@@ -769,6 +789,7 @@ components:
         name: { type: string, example: 'Reading Assistant' }
         version: { type: string, example: '0.1.0' }
         description: { type: string }
+        source: { type: string, enum: [inline, repo], description: 'Template source' }
         installed: { type: boolean, example: true }
         ready: { type: boolean, description: 'true if all required credentials are configured' }
         missingCredentials:

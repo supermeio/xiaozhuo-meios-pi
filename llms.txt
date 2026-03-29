@@ -24,7 +24,7 @@ OpenAPI spec: https://github.com/supermeio/xiaozhuo-meios-pi/blob/main/openapi.y
 - PUT /api/v1/credentials/:service — Store encrypted credential
 - GET /api/v1/credentials — List credentials (metadata only)
 - DELETE /api/v1/credentials/:service — Remove credential
-- POST /api/v1/meios — Provision a meio from template
+- POST /api/v1/meios — Provision a meio (inline definition or GitHub repo)
 - GET /api/v1/meios — List provisioned meios
 - DELETE /api/v1/meios/:type — Remove a meio
 - GET /api/v1/sandbox/url — Get direct sandbox URL
